@@ -1,0 +1,10 @@
+streamlit>=1.35.0
+anthropic>=0.25.0
+gspread>=6.0.0
+google-auth>=2.29.0
+requests>=2.31.0
+beautifulsoup4>=4.12.0
+trafilatura>=1.9.0
+pandas>=2.2.0
+openpyxl>=3.1.0
+brevo-python>=1.0.0
