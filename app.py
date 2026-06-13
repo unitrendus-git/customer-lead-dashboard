@@ -933,9 +933,31 @@ def tab_ham(sh) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def main() -> None:
-    # ── TEMPORARY DIAGNOSTIC — remove after Sheets connection confirmed ──
-    from diag import diag_sheets
-    diag_sheets()
+    # ── TEMPORARY DIAGNOSTIC ──────────────────────────────────────────────
+    import traceback, json as _json
+    try:
+        import gspread as _gs
+        from google.oauth2.service_account import Credentials as _Creds
+        sa_raw    = get_secret("GOOGLE_SERVICE_ACCOUNT")
+        gsheet_id = get_secret("GSHEET_ID")
+        with st.expander("🔧 Sheets diagnostic", expanded=True):
+            st.write(f"GSHEET_ID: `{gsheet_id[:12] if gsheet_id else 'MISSING'}`")
+            st.write(f"SA JSON length: `{len(sa_raw) if sa_raw else 0}`")
+            sa_info = _json.loads(sa_raw)
+            st.write(f"client_email: `{sa_info.get('client_email')}`")
+            pk = sa_info.get("private_key","")
+            if r"\n" in pk:
+                sa_info["private_key"] = pk.replace(r"\n", chr(10))
+            creds = _Creds.from_service_account_info(sa_info, scopes=[
+                "https://spreadsheets.google.com/feeds",
+                "https://www.googleapis.com/auth/drive",
+            ])
+            gc = _gs.authorize(creds)
+            sh = gc.open_by_key(gsheet_id)
+            st.success(f"✅ Connected: **{sh.title}**")
+    except Exception:
+        st.error("Diagnostic failed:")
+        st.code(traceback.format_exc())
     # ── header ──
     st.markdown(
         """
