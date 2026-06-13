@@ -1171,6 +1171,11 @@ def tab_new_contacts(sh) -> None:
         st.info("No contacts loaded yet. Upload a file on the Upload tab first.")
         return
 
+    # DEBUG: sample first customer_status values to diagnose read issue
+    sample_statuses = [r.get("customer_status") for r in all_rows[:5]]
+    sample_spent    = [r.get("total_spent") for r in all_rows[:5]]
+    st.caption(f"Debug sample — customer_status: {sample_statuses} | total_spent: {sample_spent}")
+
     # Pre-compute safe fields for every row once, not inside the render loop
     prepped = []
     for r in all_rows:
