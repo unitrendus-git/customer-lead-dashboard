@@ -680,22 +680,28 @@ def _backfill_customers(sh) -> None:
             st.caption(f"Debug: {nc_hit} rows matched, {len(nc_updates)} cell updates queued")
 
             if nc_updates:
-                # Split into chunks of 500 to avoid payload limits
+                # Use sheet-name-prefixed ranges to guarantee writes land on new_contacts
+                # not the default/first tab (which is master_companies)
+                sheet_title = nc_ws.title
                 chunk_size = 500
                 for chunk_start in range(0, len(nc_updates), chunk_size):
                     chunk = nc_updates[chunk_start:chunk_start + chunk_size]
                     body = {
                         "data": [
                             {
-                                "range": gspread.utils.rowcol_to_a1(r, c),
+                                "range": f"'{sheet_title}'!{gspread.utils.rowcol_to_a1(r, c)}",
                                 "values": [[_sanitize_value(v)]],
                             }
                             for r, c, v in chunk
                         ],
-                        "valueInputOption": "USER_ENTERED",
+                        "valueInputOption": "RAW",
                     }
                     nc_ws.spreadsheet.values_batch_update(body)
                     time.sleep(0.5)
+
+                # Verify: read back row 2 customer_status to confirm write landed
+                verify_val = nc_ws.cell(2, status_c).value if status_c else "?"
+                st.caption(f"Debug verify: new_contacts D2 = {repr(verify_val)}")
 
         st.success(f"✅ new_contacts: updated {nc_hit:,} domains ({len(nc_updates):,} cells)")
         st.session_state["nc_cache_dirty"] = True
