@@ -28,7 +28,6 @@ try:
 except ImportError:
     GSPREAD_OK = False
 
-# Optional heavy imports — graceful fallback if not yet installed
 try:
     import pandas as pd
     PD_OK = True
@@ -36,7 +35,7 @@ except ImportError:
     PD_OK = False
 
 try:
-    import openpyxl  # required for pd.read_excel engine="openpyxl"
+    import openpyxl
     OPENPYXL_OK = True
 except ImportError:
     OPENPYXL_OK = False
@@ -54,7 +53,6 @@ from utils import (
     now_str, today_str, extract_domain, format_currency, tier_badge,
 )
 
-# SUPPRESS_OUTREACH derived from OUTREACH_ENABLED (not a separate export in utils)
 SUPPRESS_OUTREACH = {cls: not enabled for cls, enabled in OUTREACH_ENABLED.items()}
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -69,7 +67,7 @@ st.set_page_config(
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
-# PERSONAL EMAIL DOMAINS — strip entirely during upload
+# CONSTANTS
 # ─────────────────────────────────────────────────────────────────────────────
 
 PERSONAL_EMAIL_DOMAINS = {
@@ -85,24 +83,27 @@ OWN_DOMAINS = {
     "uni-trend.com",
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
-# UPLOAD CONSTANTS
-# ─────────────────────────────────────────────────────────────────────────────
+EDUCATION_TLDS  = {".edu", ".ac.uk", ".edu.au", ".edu.ca"}
+GOVERNMENT_TLDS = {".gov", ".mil", ".gov.uk", ".gc.ca"}
 
-BATCH_SIZE  = 200   # rows per Sheets API append call
+DEFENSE_DOMAINS = {
+    "lmco.com", "l3harris.com", "harris.com", "boeing.com",
+    "northropgrumman.com", "ngc.com", "raytheon.com", "rtx.com",
+    "baesystems.com", "textron.com",
+}
+
+HAM_SIGNALS = {"arrl", "qrz", "hamradio", "ham"}
+
+BATCH_SIZE  = 200   # rows per append call
 BATCH_DELAY = 1.0   # seconds between append batches
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# NaN SANITIZER
+# HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _sanitize_row(row: list) -> list:
-    """
-    Replace float nan / inf with empty string.
-    The Sheets API rejects JSON-non-compliant floats; pandas emits them for
-    empty numeric cells.
-    """
+    """Replace float nan/inf with '' — Sheets API rejects JSON-non-compliant floats."""
     result = []
     for v in row:
         if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
@@ -112,18 +113,51 @@ def _sanitize_row(row: list) -> list:
     return result
 
 
+def _batch_update(ws, updates_needed: list) -> None:
+    """
+    Fire a single values_batch_update for a list of (row_1based, col_1based, value)
+    tuples. One API call regardless of how many cells — avoids 429 quota errors.
+    """
+    body = {
+        "data": [
+            {
+                "range":  gspread.utils.rowcol_to_a1(r, c),
+                "values": [[v]],
+            }
+            for r, c, v in updates_needed
+        ],
+        "valueInputOption": "USER_ENTERED",
+    }
+    ws.spreadsheet.values_batch_update(body)
+
+
+def _sheet_index(sh) -> tuple:
+    """
+    Read master_companies once and return (ws, col_map, domain_row_index).
+      col_map          — {header_name: 0-based column index}
+      domain_row_index — {domain_string: 0-based row index in all_vals}
+    """
+    ws       = sh.worksheet(SHEET_MASTER)
+    all_vals = ws.get_all_values()
+    if not all_vals:
+        return ws, {}, {}
+    headers  = all_vals[0]
+    col      = {h: i for i, h in enumerate(headers)}
+    dom_col  = col.get("domain", 0)
+    dom_idx  = {all_vals[i][dom_col]: i for i in range(1, len(all_vals))}
+    return ws, col, dom_idx
+
+
 # ─────────────────────────────────────────────────────────────────────────────
-# STARTUP — SHEETS CONNECTION
+# STARTUP
 # ─────────────────────────────────────────────────────────────────────────────
 
 @st.cache_resource(ttl=300)
 def get_sheet():
-    """Open the CLD Google Sheet. Cached for 5 minutes."""
     return gsheet_open()
 
 
 def startup():
-    """Run once per session: open Sheet and ensure all tabs exist."""
     sh = get_sheet()
     if sh:
         gsheet_ensure_tabs(sh)
@@ -134,129 +168,178 @@ def startup():
 # FILE-TYPE DETECTION
 # ─────────────────────────────────────────────────────────────────────────────
 
-def detect_file_type(df: "pd.DataFrame") -> str | None:
+def detect_file_type(df: "pd.DataFrame") -> "str | None":
     """
     Identify upload type from column headers.
-
-    Returns one of:
-      "brevo"            — Brevo CSV export
-      "shopify_contacts" — Shopify contacts XLSX
-      "shopify_orders"   — Shopify orders CSV
+      "brevo"            — Brevo CSV  (all-caps EMAIL, FIRSTNAME, LASTNAME, COMPANY)
+      "shopify_contacts" — Shopify contacts XLSX  (mixed-case Email, First Name, Last Name)
+      "shopify_orders"   — Shopify orders CSV  (Name, Financial Status, Lineitem name/price)
       None               — unrecognised
-
-    Detection logic:
-      - Brevo:            requires EMAIL, FIRSTNAME, LASTNAME, COMPANY (all caps)
-      - Shopify contacts: requires Email, First Name, Last Name (mixed case)
-                          AND must NOT have all-caps EMAIL (guards against
-                          Brevo variants that include mixed-case aliases)
-      - Shopify orders:   requires Name, Financial Status, Lineitem name,
-                          Lineitem price
     """
     cols = set(df.columns)
+    brevo_req  = {"EMAIL", "FIRSTNAME", "LASTNAME", "COMPANY"}
+    sc_req     = {"Email", "First Name", "Last Name"}
+    orders_req = {"Name", "Financial Status", "Lineitem name", "Lineitem price"}
 
-    brevo_required           = {"EMAIL", "FIRSTNAME", "LASTNAME", "COMPANY"}
-    shopify_contact_required = {"Email", "First Name", "Last Name"}
-    shopify_orders_required  = {"Name", "Financial Status", "Lineitem name", "Lineitem price"}
-
-    if brevo_required.issubset(cols):
+    if brevo_req.issubset(cols):
         return "brevo"
-    if shopify_contact_required.issubset(cols) and "EMAIL" not in cols:
+    # Guard: Shopify contacts must NOT have all-caps EMAIL (avoids Brevo overlap)
+    if sc_req.issubset(cols) and "EMAIL" not in cols:
         return "shopify_contacts"
-    if shopify_orders_required.issubset(cols):
+    if orders_req.issubset(cols):
         return "shopify_orders"
-
     return None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# FILE READERS
+# FILE READER
 # ─────────────────────────────────────────────────────────────────────────────
 
 def read_uploaded_file(f) -> "pd.DataFrame | None":
-    """
-    Read an uploaded file into a DataFrame.
-    Supports: .csv, .xlsx
-    Returns None on failure with a user-visible warning.
-    """
     if not PD_OK:
-        st.error("pandas is not installed. Check requirements.txt.")
+        st.error("pandas not installed.")
         return None
-
     name = f.name.lower()
     try:
         if name.endswith(".xlsx"):
             if not OPENPYXL_OK:
-                st.error("openpyxl is not installed. Check requirements.txt.")
+                st.error("openpyxl not installed.")
                 return None
             return pd.read_excel(io.BytesIO(f.read()), engine="openpyxl")
-        else:
-            # Default: CSV — try UTF-8 first, fall back to latin-1
-            raw = f.read()
-            try:
-                return pd.read_csv(io.BytesIO(raw), dtype=str)
-            except UnicodeDecodeError:
-                return pd.read_csv(io.BytesIO(raw), dtype=str, encoding="latin-1")
+        raw = f.read()
+        try:
+            return pd.read_csv(io.BytesIO(raw), dtype=str)
+        except UnicodeDecodeError:
+            return pd.read_csv(io.BytesIO(raw), dtype=str, encoding="latin-1")
     except Exception as ex:
         st.warning(f"Could not read {f.name}: {ex}")
         return None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# DOMAIN CLASSIFICATION HELPERS
+# DOMAIN CLASSIFIER
 # ─────────────────────────────────────────────────────────────────────────────
-
-EDUCATION_TLDS = {".edu", ".ac.uk", ".edu.au", ".edu.ca"}
-GOVERNMENT_TLDS = {".gov", ".mil", ".gov.uk", ".gc.ca"}
-
-DEFENSE_DOMAINS = {
-    "lmco.com", "l3harris.com", "harris.com", "boeing.com",
-    "northropgrumman.com", "ngc.com", "raytheon.com", "rtx.com",
-    "baesystems.com", "textron.com",
-}
-
-HAM_SIGNALS = {"arrl", "qrz", "hamradio", "ham"}  # substring hints — enrichment corrects
-
 
 def classify_domain(domain: str) -> str:
     """
-    Derive domain_class from the domain string alone.
-    Returns: commercial / education / government / defense / ham.
+    Infer domain_class from domain string alone.
     Never returns 'distributor' — that requires master list context.
-    Distributor domains uploaded via new exports land as 'commercial' and
-    should be corrected during New Contacts review.
     """
     d = domain.lower().strip()
-
     if d in DEFENSE_DOMAINS:
         return "defense"
-
     for tld in EDUCATION_TLDS:
         if d.endswith(tld):
             return "education"
-
     for tld in GOVERNMENT_TLDS:
         if d.endswith(tld):
             return "government"
-
     for hint in HAM_SIGNALS:
         if hint in d:
             return "ham"
-
     return "commercial"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# BREVO PROCESSOR
+# ROW BUILDERS
 # ─────────────────────────────────────────────────────────────────────────────
 
-def process_brevo(df: "pd.DataFrame", existing_domains: set) -> dict:
-    """
-    Parse a Brevo contacts CSV export.
+def _blank_master_row() -> dict:
+    return {h: "" for h in MASTER_HEADERS}
 
-    Returns dict with keys:
-      new_master_rows, new_contact_rows, update_map, filtered, filter_reasons
+
+def _master_row_to_list(row: dict) -> list:
+    return [row.get(h, "") for h in MASTER_HEADERS]
+
+
+def _new_contact_row(master_row: dict) -> list:
+    return [
+        master_row.get("domain", ""),
+        master_row.get("company_name", ""),
+        master_row.get("domain_class", ""),
+        master_row.get("customer_status", ""),
+        master_row.get("total_spent", 0),
+        master_row.get("total_orders", 0),
+        master_row.get("brevo_contacts", 0),
+        master_row.get("tags", ""),
+        master_row.get("has_event_tag", "False"),
+        master_row.get("best_contact_name", ""),
+        master_row.get("best_contact_email", ""),
+        master_row.get("best_contact_title", ""),
+        master_row.get("first_seen", today_str()),
+        master_row.get("monitor", "True"),
+        master_row.get("enrich", "False"),
+        today_str(),
+        "False",
+    ]
+
+
+def _build_master_row(domain, company, email, name, tags, cls, source) -> dict:
+    """Build a complete new master_companies row dict from parsed contact data."""
+    monitor_default = DEFAULT_MONITOR.get(cls, True)
+    suppress        = SUPPRESS_OUTREACH.get(cls, False)
+    is_brevo        = source == "brevo"
+    is_shopify      = source == "shopify"
+
+    row = _blank_master_row()
+    row.update({
+        "domain":             domain,
+        "company_name":       company,
+        "domain_class":       cls,
+        "customer_status":    "prospect",
+        "watch_tier":         2,
+        "score":              1,
+        "score_domain":       1,
+        "score_contact":      1,
+        "score_engagement":   1,
+        "monitor":            str(monitor_default),
+        "enrich":             "False",
+        "suppress_outreach":  str(suppress),
+        "brevo_contacts":     1 if is_brevo else 0,
+        "shopify_contacts":   1 if is_shopify else 0,
+        "total_spent":        0,
+        "total_orders":       0,
+        "best_contact_name":  name,
+        "best_contact_email": email,
+        "tags":               tags,
+        "has_event_tag":      "True" if tags else "False",
+        "in_brevo":           str(is_brevo),
+        "in_shopify":         str(is_shopify),
+        "has_purchases":      "False",
+        "first_seen":         today_str(),
+        "last_activity":      now_str(),
+        "enriched":           "False",
+        "outreach_status":    "none",
+    })
+    if domain in MANUAL_REVIEW_DOMAINS:
+        row["notes"] = MANUAL_REVIEW_DOMAINS[domain]
+    return row
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CONTACT FILE PARSER (shared by Brevo + Shopify contacts)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _parse_contact_file(df: "pd.DataFrame", existing_domains: set,
+                        source: str) -> dict:
+    """
+    Core contact-parsing logic shared by Brevo and Shopify contacts.
+    source: "brevo" | "shopify"
     """
     from collections import Counter
+
+    if source == "brevo":
+        col_email   = "EMAIL"
+        col_company = "COMPANY"
+        col_first   = "FIRSTNAME"
+        col_last    = "LASTNAME"
+        col_tags    = "TAGS"
+    else:
+        col_email   = "Email"
+        col_company = "Company"
+        col_first   = "First Name"
+        col_last    = "Last Name"
+        col_tags    = "Tags"
 
     new_master   = []
     new_contacts = []
@@ -266,87 +349,45 @@ def process_brevo(df: "pd.DataFrame", existing_domains: set) -> dict:
     seen         = set()
 
     for _, row in df.iterrows():
-        email   = str(row.get("EMAIL", "")).strip().lower()
-        company = str(row.get("COMPANY", "")).strip()
+        email = str(row.get(col_email, "")).strip().lower()
+
+        # Shopify: company fallback to Address Company
+        company = str(
+            row.get(col_company, "") or row.get("Address Company", "")
+        ).strip()
 
         if not email or "@" not in email:
-            filtered += 1
-            reasons["no email"] += 1
-            continue
+            filtered += 1; reasons["no email"] += 1; continue
 
         domain = extract_domain(email)
-
         if not domain:
-            filtered += 1
-            reasons["no domain"] += 1
-            continue
-
+            filtered += 1; reasons["no domain"] += 1; continue
         if domain in PERSONAL_EMAIL_DOMAINS:
-            filtered += 1
-            reasons["personal email"] += 1
-            continue
-
+            filtered += 1; reasons["personal email"] += 1; continue
         if domain in OWN_DOMAINS:
-            filtered += 1
-            reasons["own domain"] += 1
-            continue
-
+            filtered += 1; reasons["own domain"] += 1; continue
         if domain in seen:
-            continue  # keep first occurrence per domain within this file
+            continue
         seen.add(domain)
 
-        first = str(row.get("FIRSTNAME", "")).strip()
-        last  = str(row.get("LASTNAME", "")).strip()
+        first = str(row.get(col_first, "")).strip()
+        last  = str(row.get(col_last, "")).strip()
         name  = f"{first} {last}".strip()
-        tags  = str(row.get("TAGS", "") or row.get("Tags", "")).strip()
+        tags  = str(row.get(col_tags, "") or "").strip()
 
         if domain in existing_domains:
-            update_map[domain] = {
-                "brevo_contacts": 1,
-                "last_activity":  now_str(),
-                "in_brevo":       "True",
-            }
+            upd = {"last_activity": now_str()}
+            if source == "brevo":
+                upd["in_brevo"] = "True"
+            else:
+                upd["in_shopify"] = "True"
             if tags:
-                update_map[domain]["tags"] = tags
+                upd["tags"] = tags
+            update_map[domain] = upd
         else:
-            cls             = classify_domain(domain)
-            monitor_default = DEFAULT_MONITOR.get(cls, True)
-            suppress        = SUPPRESS_OUTREACH.get(cls, False)
-
-            master_row = _blank_master_row()
-            master_row.update({
-                "domain":             domain,
-                "company_name":       company,
-                "domain_class":       cls,
-                "customer_status":    "prospect",
-                "watch_tier":         2,
-                "score":              1,
-                "score_domain":       1,
-                "score_contact":      1,
-                "score_engagement":   1,
-                "monitor":            str(monitor_default),
-                "enrich":             "False",
-                "suppress_outreach":  str(suppress),
-                "brevo_contacts":     1,
-                "shopify_contacts":   0,
-                "total_spent":        0,
-                "total_orders":       0,
-                "best_contact_name":  name,
-                "best_contact_email": email,
-                "tags":               tags,
-                "has_event_tag":      "True" if tags else "False",
-                "in_brevo":           "True",
-                "in_shopify":         "False",
-                "has_purchases":      "False",
-                "first_seen":         today_str(),
-                "last_activity":      now_str(),
-                "enriched":           "False",
-                "outreach_status":    "none",
-            })
-
-            if domain in MANUAL_REVIEW_DOMAINS:
-                master_row["notes"] = MANUAL_REVIEW_DOMAINS[domain]
-
+            cls        = classify_domain(domain)
+            master_row = _build_master_row(domain, company, email, name,
+                                           tags, cls, source)
             new_master.append(master_row)
             new_contacts.append(_new_contact_row(master_row))
             existing_domains.add(domain)
@@ -360,122 +401,12 @@ def process_brevo(df: "pd.DataFrame", existing_domains: set) -> dict:
     }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# SHOPIFY CONTACTS PROCESSOR
-# ─────────────────────────────────────────────────────────────────────────────
+def process_brevo(df, existing_domains):
+    return _parse_contact_file(df, existing_domains, "brevo")
 
-def process_shopify_contacts(df: "pd.DataFrame", existing_domains: set) -> dict:
-    """
-    Parse a Shopify contacts XLSX export.
 
-    Column names: Email, First Name, Last Name, Tags, ...
-    Company is in 'Company' when present or 'Address Company' as fallback.
-    Same filtering rules as Brevo, different column names.
-    """
-    from collections import Counter
-
-    new_master   = []
-    new_contacts = []
-    update_map   = {}
-    filtered     = 0
-    reasons      = Counter()
-    seen         = set()
-
-    for _, row in df.iterrows():
-        email = str(row.get("Email", "")).strip().lower()
-
-        # Company: top-level preferred, address fallback
-        company = str(row.get("Company", "") or row.get("Address Company", "")).strip()
-
-        if not email or "@" not in email:
-            filtered += 1
-            reasons["no email"] += 1
-            continue
-
-        domain = extract_domain(email)
-
-        if not domain:
-            filtered += 1
-            reasons["no domain"] += 1
-            continue
-
-        if domain in PERSONAL_EMAIL_DOMAINS:
-            filtered += 1
-            reasons["personal email"] += 1
-            continue
-
-        if domain in OWN_DOMAINS:
-            filtered += 1
-            reasons["own domain"] += 1
-            continue
-
-        if domain in seen:
-            continue
-        seen.add(domain)
-
-        first = str(row.get("First Name", "")).strip()
-        last  = str(row.get("Last Name", "")).strip()
-        name  = f"{first} {last}".strip()
-        tags  = str(row.get("Tags", "")).strip()
-
-        if domain in existing_domains:
-            update_map[domain] = {
-                "shopify_contacts": 1,
-                "last_activity":    now_str(),
-                "in_shopify":       "True",
-            }
-            if tags:
-                update_map[domain]["tags"] = tags
-        else:
-            cls             = classify_domain(domain)
-            monitor_default = DEFAULT_MONITOR.get(cls, True)
-            suppress        = SUPPRESS_OUTREACH.get(cls, False)
-
-            master_row = _blank_master_row()
-            master_row.update({
-                "domain":             domain,
-                "company_name":       company,
-                "domain_class":       cls,
-                "customer_status":    "prospect",
-                "watch_tier":         2,
-                "score":              1,
-                "score_domain":       1,
-                "score_contact":      1,
-                "score_engagement":   1,
-                "monitor":            str(monitor_default),
-                "enrich":             "False",
-                "suppress_outreach":  str(suppress),
-                "brevo_contacts":     0,
-                "shopify_contacts":   1,
-                "total_spent":        0,
-                "total_orders":       0,
-                "best_contact_name":  name,
-                "best_contact_email": email,
-                "tags":               tags,
-                "has_event_tag":      "True" if tags else "False",
-                "in_brevo":           "False",
-                "in_shopify":         "True",
-                "has_purchases":      "False",
-                "first_seen":         today_str(),
-                "last_activity":      now_str(),
-                "enriched":           "False",
-                "outreach_status":    "none",
-            })
-
-            if domain in MANUAL_REVIEW_DOMAINS:
-                master_row["notes"] = MANUAL_REVIEW_DOMAINS[domain]
-
-            new_master.append(master_row)
-            new_contacts.append(_new_contact_row(master_row))
-            existing_domains.add(domain)
-
-    return {
-        "new_master_rows":  new_master,
-        "new_contact_rows": new_contacts,
-        "update_map":       update_map,
-        "filtered":         filtered,
-        "filter_reasons":   reasons,
-    }
+def process_shopify_contacts(df, existing_domains):
+    return _parse_contact_file(df, existing_domains, "shopify")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -484,17 +415,12 @@ def process_shopify_contacts(df: "pd.DataFrame", existing_domains: set) -> dict:
 
 def process_shopify_orders(df: "pd.DataFrame", existing_domains: set) -> dict:
     """
-    Parse a Shopify orders CSV export.
+    Parse a Shopify orders CSV.
 
-    Shopify orders use a multi-row format: Email / Total / Financial Status /
-    Tags appear only on the FIRST row of each order. Continuation rows carry
-    additional line items for the same order and have a blank Email field.
-    State is carried forward via current_* variables.
+    Multi-row format: Email/Total/Status/Tags on the FIRST row of each order;
+    continuation rows have blank Email. Carry-forward state via current_* vars.
 
-    Skips:
-      - Orders where Tags contains "amazon" (case-insensitive)
-      - Orders where Financial Status == "refunded"
-      - Personal / own email domains
+    Skips amazon-tagged orders, refunded orders, personal/own domains.
     """
     from collections import Counter
 
@@ -503,68 +429,42 @@ def process_shopify_orders(df: "pd.DataFrame", existing_domains: set) -> dict:
     filtered      = 0
     reasons       = Counter()
 
-    current_email   = ""
-    current_total   = 0.0
-    current_status  = ""
-    current_tags    = ""
-    current_order   = ""
-    current_date    = ""
-    current_company = ""
+    current_email = current_order = current_date = current_company = ""
+    current_total  = 0.0
+    current_status = current_tags = ""
 
     for _, row in df.iterrows():
-
         email_raw = str(row.get("Email", "")).strip()
 
         if email_raw and "@" in email_raw:
-            # ── first row of a new order ──
             current_email   = email_raw.lower()
             current_order   = str(row.get("Name", "")).strip()
-            current_date    = str(
-                row.get("Created at", "") or row.get("Paid at", "")
-            ).strip()
+            current_date    = str(row.get("Created at", "") or row.get("Paid at", "")).strip()
             current_company = str(row.get("Billing Company", "")).strip()
-
             try:
-                current_total = float(
-                    str(row.get("Total", 0) or 0).replace(",", "")
-                )
+                current_total = float(str(row.get("Total", 0) or 0).replace(",", ""))
             except ValueError:
                 current_total = 0.0
-
             current_status = str(row.get("Financial Status", "")).strip().lower()
             current_tags   = str(row.get("Tags", "")).strip()
 
-            # order-level filters
             if current_status == "refunded":
-                filtered += 1
-                reasons["refunded order"] += 1
-                current_email = ""
-                continue
-
+                filtered += 1; reasons["refunded order"] += 1
+                current_email = ""; continue
             if "amazon" in current_tags.lower():
-                filtered += 1
-                reasons["amazon order"] += 1
-                current_email = ""
-                continue
+                filtered += 1; reasons["amazon order"] += 1
+                current_email = ""; continue
 
             domain = extract_domain(current_email)
             if not domain:
-                current_email = ""
-                continue
-
+                current_email = ""; continue
             if domain in PERSONAL_EMAIL_DOMAINS:
-                filtered += 1
-                reasons["personal email"] += 1
-                current_email = ""
-                continue
-
+                filtered += 1; reasons["personal email"] += 1
+                current_email = ""; continue
             if domain in OWN_DOMAINS:
-                filtered += 1
-                reasons["own domain"] += 1
-                current_email = ""
-                continue
+                filtered += 1; reasons["own domain"] += 1
+                current_email = ""; continue
 
-        # ── line item row (first or continuation) ──
         if not current_email:
             continue
 
@@ -572,36 +472,35 @@ def process_shopify_orders(df: "pd.DataFrame", existing_domains: set) -> dict:
         if not domain:
             continue
 
-        product   = str(row.get("Lineitem name", "")).strip()
-        sku       = str(row.get("Lineitem sku", "")).strip()
-        qty_raw   = str(row.get("Lineitem quantity", 1) or 1)
-        price_raw = str(row.get("Lineitem price", 0) or 0)
-
         try:
-            qty = int(float(qty_raw))
+            qty = int(float(str(row.get("Lineitem quantity", 1) or 1)))
         except ValueError:
             qty = 1
         try:
-            price = float(price_raw.replace(",", ""))
+            price = float(str(row.get("Lineitem price", 0) or 0).replace(",", ""))
         except ValueError:
             price = 0.0
 
-        fulfil = str(row.get("Fulfillment Status", "")).strip()
-
         order_rows.append([
-            domain, current_order, current_date,
-            product, sku, price, qty, current_total,
-            fulfil, current_status, current_company, current_email,
+            domain,
+            current_order,
+            current_date,
+            str(row.get("Lineitem name", "")).strip(),
+            str(row.get("Lineitem sku", "")).strip(),
+            price,
+            qty,
+            current_total,
+            str(row.get("Fulfillment Status", "")).strip(),
+            current_status,
+            current_company,
+            current_email,
         ])
 
         if domain not in domain_totals:
             domain_totals[domain] = {
-                "total_spent":    0.0,
-                "total_orders":   0,
-                "last_date":      current_date,
-                "email":          current_email,
-                "company":        current_company,
-                "counted_orders": set(),
+                "total_spent": 0.0, "total_orders": 0,
+                "last_date": current_date, "email": current_email,
+                "company": current_company, "counted_orders": set(),
             }
         stats = domain_totals[domain]
         if current_order not in stats["counted_orders"]:
@@ -620,68 +519,23 @@ def process_shopify_orders(df: "pd.DataFrame", existing_domains: set) -> dict:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ROW BUILDERS
+# BATCH APPEND WRITER
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _blank_master_row() -> dict:
-    """Return a dict with all MASTER_HEADERS keys initialised to empty string."""
-    return {h: "" for h in MASTER_HEADERS}
-
-
-def _master_row_to_list(row: dict) -> list:
-    """Convert a master_row dict to an ordered list matching MASTER_HEADERS."""
-    return [row.get(h, "") for h in MASTER_HEADERS]
-
-
-def _new_contact_row(master_row: dict) -> list:
-    """Build a new_contacts list row from a master_row dict."""
-    return [
-        master_row.get("domain", ""),
-        master_row.get("company_name", ""),
-        master_row.get("domain_class", ""),
-        master_row.get("customer_status", ""),
-        master_row.get("total_spent", 0),
-        master_row.get("total_orders", 0),
-        master_row.get("brevo_contacts", 0),
-        master_row.get("tags", ""),
-        master_row.get("has_event_tag", "False"),
-        master_row.get("best_contact_name", ""),
-        master_row.get("best_contact_email", ""),
-        master_row.get("best_contact_title", ""),
-        master_row.get("first_seen", today_str()),
-        master_row.get("monitor", "True"),
-        master_row.get("enrich", "False"),
-        today_str(),  # added_date
-        "False",      # reviewed
-    ]
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# BATCH WRITER
-# ─────────────────────────────────────────────────────────────────────────────
-
-def batch_write(sh, tab_name: str, rows: list[list],
-                progress_label: str = "") -> bool:
+def batch_write(sh, tab_name: str, rows: list, progress_label: str = "") -> bool:
     """
-    Append rows to a Sheet tab in chunks of BATCH_SIZE, with a short delay
-    between chunks to avoid Sheets API write-quota errors.
-    Sanitizes each row to remove nan / inf before sending.
-    Returns True if all batches succeeded.
+    Append rows in BATCH_SIZE chunks with BATCH_DELAY between chunks.
+    Sanitizes nan/inf values before each write.
     """
     if not rows:
         return True
-
-    total   = len(rows)
     success = True
-
-    for start in range(0, total, BATCH_SIZE):
+    for start in range(0, len(rows), BATCH_SIZE):
         batch = [_sanitize_row(r) for r in rows[start : start + BATCH_SIZE]]
-        ok = sheet_append_rows(sh, tab_name, batch)
-        if not ok:
+        if not sheet_append_rows(sh, tab_name, batch):
             success = False
-        if start + BATCH_SIZE < total:
+        if start + BATCH_SIZE < len(rows):
             time.sleep(BATCH_DELAY)
-
     return success
 
 
@@ -689,20 +543,17 @@ def batch_write(sh, tab_name: str, rows: list[list],
 # UPLOAD SUMMARY
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _render_upload_summary(results: list[dict]) -> None:
-    """Render metric cards and filter breakdown after all files are processed."""
+def _render_upload_summary(results: list) -> None:
+    from collections import Counter
     total_new      = sum(r.get("new_added", 0)        for r in results)
     total_updated  = sum(r.get("existing_updated", 0) for r in results)
     total_orders   = sum(r.get("orders_written", 0)   for r in results)
     total_filtered = sum(r.get("filtered", 0)         for r in results)
-
-    from collections import Counter
     merged: Counter = Counter()
     for r in results:
         merged += r.get("filter_reasons", Counter())
 
     st.success("✅ Upload complete")
-
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("New companies",      total_new)
     c2.metric("Existing updated",   total_updated)
@@ -720,8 +571,6 @@ def _render_upload_summary(results: list[dict]) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def tab_upload(sh) -> None:
-    """Upload tab: accept one or more files, auto-detect type, process all."""
-
     st.header("Upload Contact & Order Data")
     st.caption(
         "Accepts Brevo CSV exports, Shopify contact XLSX exports, and "
@@ -730,10 +579,7 @@ def tab_upload(sh) -> None:
     )
 
     if not PD_OK:
-        st.error(
-            "**pandas** is not installed. "
-            "Add `pandas` and `openpyxl` to requirements.txt and redeploy."
-        )
+        st.error("**pandas** is not installed. Add pandas and openpyxl to requirements.txt.")
         return
 
     uploaded_files = st.file_uploader(
@@ -744,10 +590,7 @@ def tab_upload(sh) -> None:
     )
 
     if not uploaded_files:
-        st.info(
-            "No files selected yet. Drag one or more files above to begin. "
-            "You can upload all three file types in a single session."
-        )
+        st.info("No files selected yet. Drag one or more files above to begin.")
         return
 
     st.write(f"**{len(uploaded_files)} file(s) ready to process:**")
@@ -768,48 +611,40 @@ def tab_upload(sh) -> None:
         df = read_uploaded_file(f)
         if df is None:
             session_results.append({
-                "file": f.name, "error": "Could not read file",
-                "new_added": 0, "existing_updated": 0,
+                "file": f.name, "new_added": 0, "existing_updated": 0,
                 "orders_written": 0, "filtered": 0, "filter_reasons": {},
             })
             continue
 
         file_type = detect_file_type(df)
-
         if file_type is None:
             st.warning(
                 f"⚠️ `{f.name}` — unrecognised column layout. "
-                "Expected Brevo CSV, Shopify contacts XLSX, or Shopify orders CSV. "
-                "Skipping."
+                "Expected Brevo CSV, Shopify contacts XLSX, or Shopify orders CSV. Skipping."
             )
             session_results.append({
-                "file": f.name, "error": "unrecognised file type",
-                "new_added": 0, "existing_updated": 0,
+                "file": f.name, "new_added": 0, "existing_updated": 0,
                 "orders_written": 0, "filtered": 0, "filter_reasons": {},
             })
             continue
 
         type_labels = {
-            "brevo":            "Brevo contacts",
+            "brevo": "Brevo contacts",
             "shopify_contacts": "Shopify contacts",
-            "shopify_orders":   "Shopify orders",
+            "shopify_orders": "Shopify orders",
         }
         progress.progress(
             pct_base + 0.1 / len(uploaded_files),
             text=f"Processing {type_labels[file_type]}: {f.name}…",
         )
 
-        if file_type == "brevo":
-            result      = process_brevo(df, existing_domains)
+        if file_type in ("brevo", "shopify_contacts"):
+            result      = (process_brevo if file_type == "brevo"
+                           else process_shopify_contacts)(df, existing_domains)
             file_result = _write_contact_results(
                 sh, result, f.name, progress, pct_base, len(uploaded_files)
             )
-        elif file_type == "shopify_contacts":
-            result      = process_shopify_contacts(df, existing_domains)
-            file_result = _write_contact_results(
-                sh, result, f.name, progress, pct_base, len(uploaded_files)
-            )
-        else:  # shopify_orders
+        else:
             result      = process_shopify_orders(df, existing_domains)
             file_result = _write_order_results(
                 sh, result, f.name, progress, pct_base, len(uploaded_files)
@@ -824,42 +659,50 @@ def tab_upload(sh) -> None:
 def _write_contact_results(sh, result: dict, filename: str,
                             progress, pct_base: float, n_files: int) -> dict:
     """
-    Write new master + new_contacts rows, and silently update existing domains,
-    for a contact file (Brevo or Shopify contacts).
+    Write new master + new_contacts rows, then update existing domains.
+    All existing-domain updates fire as a single values_batch_update call —
+    one API request regardless of domain count — eliminating 429 errors.
     """
     new_master   = result["new_master_rows"]
     new_contacts = result["new_contact_rows"]
     update_map   = result["update_map"]
 
-    master_lists  = [_master_row_to_list(r) for r in new_master]
-    contact_lists = new_contacts  # already lists
-
     new_added = 0
-    if master_lists:
-        progress.progress(
-            pct_base + 0.4 / n_files,
-            text=f"Writing {len(master_lists):,} new companies…",
-        )
-        if batch_write(sh, SHEET_MASTER, master_lists):
-            new_added = len(master_lists)
+    if new_master:
+        progress.progress(pct_base + 0.4 / n_files,
+                          text=f"Writing {len(new_master):,} new companies…")
+        if batch_write(sh, SHEET_MASTER, [_master_row_to_list(r) for r in new_master]):
+            new_added = len(new_master)
 
-    if contact_lists:
-        progress.progress(
-            pct_base + 0.6 / n_files,
-            text=f"Writing {len(contact_lists):,} new_contacts rows…",
-        )
-        batch_write(sh, SHEET_NEW_CONTACTS, contact_lists)
+    if new_contacts:
+        progress.progress(pct_base + 0.6 / n_files,
+                          text=f"Writing {len(new_contacts):,} new_contacts rows…")
+        batch_write(sh, SHEET_NEW_CONTACTS, new_contacts)
 
     existing_updated = 0
-    if update_map:
-        progress.progress(
-            pct_base + 0.8 / n_files,
-            text=f"Updating {len(update_map):,} existing companies…",
-        )
-        for domain, updates in update_map.items():
-            sheet_update_row(sh, SHEET_MASTER, "domain", domain, updates)
-            existing_updated += 1
-            time.sleep(0.12)  # ~8 writes/sec — well within 60/min quota
+    if update_map and GSPREAD_OK:
+        progress.progress(pct_base + 0.75 / n_files,
+                          text=f"Reading master list for {len(update_map):,} updates…")
+        try:
+            ws, col, dom_idx = _sheet_index(sh)
+            updates_needed   = []
+
+            for domain, updates in update_map.items():
+                if domain not in dom_idx:
+                    continue
+                r = dom_idx[domain]
+                for field, value in updates.items():
+                    if field in col:
+                        updates_needed.append((r + 1, col[field] + 1, value))
+                existing_updated += 1
+
+            if updates_needed:
+                progress.progress(pct_base + 0.9 / n_files,
+                                  text=f"Writing {existing_updated:,} contact updates…")
+                _batch_update(ws, updates_needed)
+
+        except Exception as ex:
+            st.warning(f"Contact update error: {ex}")
 
     return {
         "file":             filename,
@@ -874,84 +717,51 @@ def _write_contact_results(sh, result: dict, filename: str,
 def _write_order_results(sh, result: dict, filename: str,
                           progress, pct_base: float, n_files: int) -> dict:
     """
-    Write order_history rows and update master_companies spend data.
-
-    Spend updates use a single values_batch_update call (one API request for
-    all domains) instead of one call per domain, avoiding the 429 quota error.
+    Write order_history rows, then update master_companies spend data.
+    All spend updates fire as a single values_batch_update call.
     """
     order_rows    = result["order_rows"]
     domain_totals = result["domain_totals"]
 
     orders_written = 0
     if order_rows:
-        progress.progress(
-            pct_base + 0.4 / n_files,
-            text=f"Writing {len(order_rows):,} order line items…",
-        )
+        progress.progress(pct_base + 0.4 / n_files,
+                          text=f"Writing {len(order_rows):,} order line items…")
         if batch_write(sh, SHEET_ORDERS, order_rows):
             orders_written = len(order_rows)
 
     if domain_totals and GSPREAD_OK:
-        progress.progress(
-            pct_base + 0.6 / n_files,
-            text=f"Reading master list for spend update…",
-        )
+        progress.progress(pct_base + 0.6 / n_files,
+                          text="Reading master list for spend update…")
         try:
-            ws       = sh.worksheet(SHEET_MASTER)
-            all_vals = ws.get_all_values()  # single read — entire sheet
+            ws, col, dom_idx = _sheet_index(sh)
+            updates_needed   = []
 
-            if all_vals:
-                headers = all_vals[0]
-                col     = {h: i for i, h in enumerate(headers)}
-                dom_col = col.get("domain", 0)
-                dom_idx = {
-                    all_vals[i][dom_col]: i
-                    for i in range(1, len(all_vals))
-                }
+            for domain, stats in domain_totals.items():
+                if domain not in dom_idx:
+                    continue
+                r = dom_idx[domain]
+                for field, value in [
+                    ("total_spent",   round(stats["total_spent"], 2)),
+                    ("total_orders",  stats["total_orders"]),
+                    ("has_purchases", "True"),
+                    ("in_shopify",    "True"),
+                    ("last_activity", now_str()),
+                ]:
+                    if field in col:
+                        updates_needed.append((r + 1, col[field] + 1, value))
+                if stats["email"] and "best_contact_email" in col:
+                    updates_needed.append(
+                        (r + 1, col["best_contact_email"] + 1, stats["email"]))
+                if stats["company"] and "company_name" in col:
+                    updates_needed.append(
+                        (r + 1, col["company_name"] + 1, stats["company"]))
 
-                updates_needed = []  # (row_1based, col_1based, value)
-
-                for domain, stats in domain_totals.items():
-                    if domain not in dom_idx:
-                        continue
-                    r = dom_idx[domain]
-
-                    for field, value in [
-                        ("total_spent",   round(stats["total_spent"], 2)),
-                        ("total_orders",  stats["total_orders"]),
-                        ("has_purchases", "True"),
-                        ("in_shopify",    "True"),
-                        ("last_activity", now_str()),
-                    ]:
-                        if field in col:
-                            updates_needed.append((r + 1, col[field] + 1, value))
-
-                    if stats["email"] and "best_contact_email" in col:
-                        updates_needed.append(
-                            (r + 1, col["best_contact_email"] + 1, stats["email"])
-                        )
-                    if stats["company"] and "company_name" in col:
-                        updates_needed.append(
-                            (r + 1, col["company_name"] + 1, stats["company"])
-                        )
-
-                if updates_needed:
-                    progress.progress(
-                        pct_base + 0.85 / n_files,
-                        text=f"Writing spend updates for "
-                             f"{len(domain_totals):,} domains…",
-                    )
-                    body = {
-                        "data": [
-                            {
-                                "range":  gspread.utils.rowcol_to_a1(r, c),
-                                "values": [[v]],
-                            }
-                            for r, c, v in updates_needed
-                        ],
-                        "valueInputOption": "USER_ENTERED",
-                    }
-                    ws.spreadsheet.values_batch_update(body)
+            if updates_needed:
+                progress.progress(
+                    pct_base + 0.85 / n_files,
+                    text=f"Writing spend updates for {len(domain_totals):,} domains…")
+                _batch_update(ws, updates_needed)
 
         except Exception as ex:
             st.warning(f"Spend update error: {ex}")
@@ -967,7 +777,7 @@ def _write_order_results(sh, result: dict, filename: str,
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# PLACEHOLDER TABS (built next session)
+# PLACEHOLDER TABS
 # ─────────────────────────────────────────────────────────────────────────────
 
 def tab_new_contacts(sh) -> None:
@@ -990,7 +800,6 @@ def tab_ham(sh) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def main() -> None:
-    # ── header ──
     st.markdown(
         """
         <div style="
@@ -1011,9 +820,7 @@ def main() -> None:
         unsafe_allow_html=True,
     )
 
-    # ── sheets connection ──
     sh = startup()
-
     if sh is None:
         st.error(
             "**Google Sheets connection failed.** "
@@ -1022,25 +829,12 @@ def main() -> None:
         )
         st.stop()
 
-    # ── tabs ──
-    tabs = st.tabs([
-        "📤 Upload",
-        "🆕 New Contacts",
-        "👁 Watch List",
-        "📻 HAM",
-    ])
+    tabs = st.tabs(["📤 Upload", "🆕 New Contacts", "👁 Watch List", "📻 HAM"])
 
-    with tabs[0]:
-        tab_upload(sh)
-
-    with tabs[1]:
-        tab_new_contacts(sh)
-
-    with tabs[2]:
-        tab_watch_list(sh)
-
-    with tabs[3]:
-        tab_ham(sh)
+    with tabs[0]: tab_upload(sh)
+    with tabs[1]: tab_new_contacts(sh)
+    with tabs[2]: tab_watch_list(sh)
+    with tabs[3]: tab_ham(sh)
 
 
 if __name__ == "__main__":
