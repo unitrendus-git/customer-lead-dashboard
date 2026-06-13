@@ -102,15 +102,16 @@ BATCH_DELAY = 1.0   # seconds between append batches
 # HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _sanitize_row(row: list) -> list:
+def _sanitize_value(v):
     """Replace float nan/inf with '' — Sheets API rejects JSON-non-compliant floats."""
-    result = []
-    for v in row:
-        if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
-            result.append("")
-        else:
-            result.append(v)
-    return result
+    if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
+        return ""
+    return v
+
+
+def _sanitize_row(row: list) -> list:
+    """Apply _sanitize_value to every element in a row list."""
+    return [_sanitize_value(v) for v in row]
 
 
 def _batch_update(ws, updates_needed: list) -> None:
@@ -122,7 +123,7 @@ def _batch_update(ws, updates_needed: list) -> None:
         "data": [
             {
                 "range":  gspread.utils.rowcol_to_a1(r, c),
-                "values": [[v]],
+                "values": [[_sanitize_value(v)]],
             }
             for r, c, v in updates_needed
         ],
@@ -141,10 +142,10 @@ def _sheet_index(sh) -> tuple:
     all_vals = ws.get_all_values()
     if not all_vals:
         return ws, {}, {}
-    headers  = all_vals[0]
-    col      = {h: i for i, h in enumerate(headers)}
-    dom_col  = col.get("domain", 0)
-    dom_idx  = {all_vals[i][dom_col]: i for i in range(1, len(all_vals))}
+    headers = all_vals[0]
+    col     = {h: i for i, h in enumerate(headers)}
+    dom_col = col.get("domain", 0)
+    dom_idx = {all_vals[i][dom_col]: i for i in range(1, len(all_vals))}
     return ws, col, dom_idx
 
 
@@ -183,7 +184,6 @@ def detect_file_type(df: "pd.DataFrame") -> "str | None":
 
     if brevo_req.issubset(cols):
         return "brevo"
-    # Guard: Shopify contacts must NOT have all-caps EMAIL (avoids Brevo overlap)
     if sc_req.issubset(cols) and "EMAIL" not in cols:
         return "shopify_contacts"
     if orders_req.issubset(cols):
@@ -660,8 +660,7 @@ def _write_contact_results(sh, result: dict, filename: str,
                             progress, pct_base: float, n_files: int) -> dict:
     """
     Write new master + new_contacts rows, then update existing domains.
-    All existing-domain updates fire as a single values_batch_update call —
-    one API request regardless of domain count — eliminating 429 errors.
+    All existing-domain updates fire as a single values_batch_update call.
     """
     new_master   = result["new_master_rows"]
     new_contacts = result["new_contact_rows"]
@@ -719,6 +718,7 @@ def _write_order_results(sh, result: dict, filename: str,
     """
     Write order_history rows, then update master_companies spend data.
     All spend updates fire as a single values_batch_update call.
+    _sanitize_value() is applied to every cell value before the API call.
     """
     order_rows    = result["order_rows"]
     domain_totals = result["domain_totals"]
@@ -741,14 +741,10 @@ def _write_order_results(sh, result: dict, filename: str,
                 if domain not in dom_idx:
                     continue
                 r = dom_idx[domain]
-def _sv(v):
-                    """Sanitize a single value — replace nan/inf with empty string."""
-                    if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
-                        return ""
-                    return v
 
+                spent = _sanitize_value(round(stats["total_spent"], 2))
                 for field, value in [
-                    ("total_spent",   _sv(round(stats["total_spent"], 2))),
+                    ("total_spent",   spent),
                     ("total_orders",  stats["total_orders"]),
                     ("has_purchases", "True"),
                     ("in_shopify",    "True"),
@@ -756,12 +752,15 @@ def _sv(v):
                 ]:
                     if field in col:
                         updates_needed.append((r + 1, col[field] + 1, value))
+
                 if stats["email"] and "best_contact_email" in col:
                     updates_needed.append(
-                        (r + 1, col["best_contact_email"] + 1, _sv(stats["email"])))
+                        (r + 1, col["best_contact_email"] + 1,
+                         _sanitize_value(stats["email"])))
                 if stats["company"] and "company_name" in col:
                     updates_needed.append(
-                        (r + 1, col["company_name"] + 1, _sv(stats["company"])))
+                        (r + 1, col["company_name"] + 1,
+                         _sanitize_value(stats["company"])))
 
             if updates_needed:
                 progress.progress(
