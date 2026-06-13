@@ -560,6 +560,307 @@ def _apply_tier1_overrides(sh) -> None:
     st.info("Go to Watch List and click Reload from Sheet to see the changes.")
 
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ENRICHMENT
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ICP labels Haiku may return -- must match ICP_LABELS in utils.py
+_ENRICH_ICP_OPTIONS = [
+    "ICP-4 R&D Engineer",
+    "ICP-5 Power Electronics",
+    "ICP-7 Test Lab",
+    "ICP-6 Education",
+    "ICP-1 Industrial",
+    "ICP-2 Electrician",
+    "ICP-3 Solar",
+    "Mixed",
+    "None",
+]
+
+_ENRICH_INDUSTRY_OPTIONS = [
+    "Electronics/Semiconductor",
+    "Power Electronics/Energy",
+    "Automotive/EV",
+    "Telecom/RF",
+    "Industrial/Manufacturing",
+    "Test & Measurement",
+    "Education",
+    "Government/Research",
+    "Other",
+]
+
+# Prompt template -- braces doubled for .format() safety
+_ENRICH_PROMPT_TMPL = (
+    "You are classifying a B2B company for a test and measurement instrument supplier.\n"
+    "The company homepage text is provided below.\n\n"
+    "Return ONLY a JSON object with these four fields -- no preamble, no markdown fences:\n"
+    "{{\n"
+    '  \"website_description\": \"One sentence (max 20 words) describing what the company does.\",\n'
+    '  \"industry\": \"<one of: {industries}>\",\n'
+    '  \"icp_label\": \"<one of: {icps}>\",\n'
+    '  \"icp_confidence\": \"<one of: High, Medium, Low>\"\n'
+    "}}\n\n"
+    "icp_label guidance:\n"
+    "- ICP-4 R&D Engineer: electronics design, FPGA, embedded, semiconductor design, hardware startup\n"
+    "- ICP-5 Power Electronics: EV, GaN/SiC, motor drives, solar inverter OEM, data-center PSU\n"
+    "- ICP-7 Test Lab: contract test lab, consultancy, EMC/EMI, product certification, prototype shop\n"
+    "- ICP-6 Education: university, community college, trade school, teaching lab, makerspace\n"
+    "- ICP-1 Industrial: plant operations, MRO, manufacturing maintenance, industrial automation\n"
+    "- ICP-2 Electrician: electrical contractor, electrical construction, field electrician\n"
+    "- ICP-3 Solar: PV installer, solar O&M, renewable energy, BESS/ESS\n"
+    "- Mixed: clearly serves multiple ICPs equally\n"
+    "- None: no obvious T&M instrument buyer (retail, food, law, HR, etc.)\n\n"
+    "Homepage text (first 1500 chars):\n"
+    "{text}"
+)
+
+
+def _enrich_fetch_text(domain: str, timeout: int = 8) -> str:
+    """Fetch homepage text via trafilatura. Returns empty string on any failure."""
+    try:
+        import trafilatura
+        import requests as _req
+        for url in [f"https://www.{domain}", f"https://{domain}"]:
+            try:
+                resp = _req.get(
+                    url, timeout=timeout,
+                    headers={"User-Agent": "Mozilla/5.0 (compatible; CLD-Enricher/1.0)"},
+                    allow_redirects=True,
+                )
+                if resp.status_code < 400:
+                    extracted = trafilatura.extract(
+                        resp.text,
+                        include_links=False,
+                        include_images=False,
+                        include_tables=False,
+                    )
+                    text = (extracted or "").strip()
+                    if text:
+                        return text[:1500]
+            except Exception:
+                continue
+        return ""
+    except Exception:
+        return ""
+
+
+def _enrich_classify(client, text: str) -> dict:
+    """Call Claude Haiku to classify a company from its homepage text."""
+    import json as _json
+    prompt = _ENRICH_PROMPT_TMPL.format(
+        industries=", ".join(_ENRICH_INDUSTRY_OPTIONS),
+        icps=", ".join(_ENRICH_ICP_OPTIONS),
+        text=text,
+    )
+    try:
+        msg = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=256,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        raw = msg.content[0].text.strip()
+        # Strip markdown fences if Haiku added them
+        if raw.startswith("```"):
+            parts = raw.split("```")
+            raw = parts[1] if len(parts) > 1 else parts[0]
+            if raw.startswith("json"):
+                raw = raw[4:]
+            raw = raw.strip()
+        result = _json.loads(raw)
+        desc = str(result.get("website_description", ""))[:120]
+        ind  = result.get("industry", "Other")
+        icp  = result.get("icp_label", "None")
+        conf = result.get("icp_confidence", "Low")
+        if ind  not in _ENRICH_INDUSTRY_OPTIONS: ind  = "Other"
+        if icp  not in _ENRICH_ICP_OPTIONS:      icp  = "None"
+        if conf not in ("High", "Medium", "Low"): conf = "Low"
+        return {"website_description": desc, "industry": ind,
+                "icp_label": icp, "icp_confidence": conf, "error": ""}
+    except Exception as ex:
+        return {"website_description": "", "industry": "",
+                "icp_label": "", "icp_confidence": "", "error": str(ex)[:120]}
+
+
+def _run_enrichment(sh, mode: str = "flagged") -> None:
+    """
+    Enrich company records from their homepage.
+
+    mode:
+      "flagged" -- only rows where enrich == "True" and enriched != "True"
+      "tier1"   -- all Tier 1 rows where enriched != "True"
+      "all"     -- all rows where enriched != "True" (use with caution)
+    """
+    import time as _time
+
+    client = get_anthropic_client()
+    if client is None:
+        st.error("Anthropic API client not available. Check ANTHROPIC_API_KEY secret.")
+        return
+
+    # ── 1. Load master_companies ───────────────────────────────────────────────
+    with st.spinner("Reading master_companies..."):
+        ws, col, dom_idx = _sheet_index(sh)
+
+    all_vals = ws.get_all_values()
+    if not all_vals:
+        st.warning("master_companies is empty.")
+        return
+    headers = all_vals[0]
+
+    def _hcol(name):
+        return headers.index(name) if name in headers else None
+
+    dom_c     = _hcol("domain")
+    enrich_c  = _hcol("enrich")
+    enrichd_c = _hcol("enriched")
+    tier_c    = _hcol("watch_tier")
+    cls_c     = _hcol("domain_class")
+
+    # ── 2. Build candidate list ───────────────────────────────────────────────
+    candidates = []  # list of (sheet_row_1based, domain)
+    for i, row in enumerate(all_vals[1:], start=2):
+        domain  = row[dom_c].strip().lower() if dom_c is not None else ""
+        if not domain:
+            continue
+        already = (
+            row[enrichd_c].strip().upper() == "TRUE"
+            if enrichd_c is not None else False
+        )
+        if already:
+            continue
+        enrich_flag = (
+            row[enrich_c].strip().upper() == "TRUE"
+            if enrich_c is not None else False
+        )
+        cls = row[cls_c].strip().lower() if cls_c is not None else ""
+        try:
+            tier_val = int(float(row[tier_c].strip())) if tier_c is not None else 3
+        except Exception:
+            tier_val = 3
+
+        # Distributors and defense: no outreach, no ICP classification needed
+        if cls in ("distributor", "defense"):
+            continue
+
+        if mode == "flagged" and not enrich_flag:
+            continue
+        if mode == "tier1" and tier_val != 1:
+            continue
+        # mode == 'all' passes everything remaining
+
+        candidates.append((i, domain))
+
+    if not candidates:
+        st.info(
+            "No domains match the enrichment criteria. "
+            "Flag domains with the Enrich checkbox in New Contacts or Watch List, "
+            "then re-run."
+        )
+        return
+
+    est_min = max(1, len(candidates) * 10 // 60)
+    st.info(
+        f"**{len(candidates):,} domain(s)** queued for enrichment. "
+        f"Estimated time: ~{est_min} min "
+        f"({len(candidates)} × ~10s each)."
+    )
+
+    # ── 3. Per-domain fetch + classify loop ─────────────────────────────
+    progress   = st.progress(0.0, text="Starting enrichment...")
+    status_box = st.empty()
+    results    = []  # (sheet_row, domain, desc, industry, icp, conf)
+    errors     = []  # (sheet_row, domain, reason)
+
+    for idx, (sheet_row, domain) in enumerate(candidates):
+        pct = idx / len(candidates)
+        progress.progress(pct, text=f"Fetching {domain}... ({idx + 1}/{len(candidates)})")
+        status_box.markdown(
+            f"<span style='font-size:0.82rem;color:#555;'>"
+            f"**{idx + 1}/{len(candidates)}** — `{domain}`</span>",
+            unsafe_allow_html=True,
+        )
+
+        text = _enrich_fetch_text(domain)
+        if not text:
+            errors.append((sheet_row, domain, "Homepage fetch failed or returned no text"))
+            _time.sleep(0.5)
+            continue
+
+        result = _enrich_classify(client, text)
+        if result["error"]:
+            errors.append((sheet_row, domain, result["error"]))
+            _time.sleep(0.5)
+            continue
+
+        results.append((
+            sheet_row, domain,
+            result["website_description"],
+            result["industry"],
+            result["icp_label"],
+            result["icp_confidence"],
+        ))
+        _time.sleep(1.0)  # ~1 req/sec -- well under Haiku rate limits
+
+    progress.progress(1.0, text="Writing results to Sheet...")
+    status_box.empty()
+
+    # ── 4. Batch-write successes to master_companies ───────────────────────
+    if results:
+        updates = []
+        for (sheet_row, domain, desc, industry, icp, conf) in results:
+            for field, value in [
+                ("website_description", desc),
+                ("industry",            industry),
+                ("icp_label",           icp),
+                ("icp_confidence",      conf),
+                ("enriched",            "True"),
+                ("enrichment_date",     today_str()),
+            ]:
+                if field in col:
+                    updates.append((sheet_row, col[field] + 1, value))
+        if updates:
+            _batch_update(ws, updates)
+
+    # ── 5. Log errors to enrichment_errors tab ────────────────────────────
+    if errors:
+        error_rows = [
+            [domain, "", today_str(), reason]
+            for (_, domain, reason) in errors
+        ]
+        batch_write(sh, SHEET_ERRORS, error_rows)
+
+    # ── 6. Invalidate Watch List cache ────────────────────────────────────
+    st.session_state["wl_cache_dirty"] = True
+
+    # ── 7. Summary ──────────────────────────────────────────────────────────
+    st.success(
+        f"Enrichment complete: **{len(results):,}** enriched, "
+        f"**{len(errors):,}** failed."
+    )
+    if results:
+        icp_counts: dict = {}
+        for (_, _, _, _, icp, _) in results:
+            icp_counts[icp] = icp_counts.get(icp, 0) + 1
+        with st.expander("ICP distribution from this run"):
+            for icp_val, cnt in sorted(icp_counts.items(), key=lambda x: -x[1]):
+                st.markdown(f"`{icp_val:<30}` {cnt:>4}")
+    if errors:
+        with st.expander(f"{len(errors)} failed domains"):
+            for (_, domain, reason) in errors[:50]:
+                st.markdown(f"- `{domain}` — {reason}")
+            if len(errors) > 50:
+                st.caption(
+                    f"... and {len(errors) - 50} more. "
+                    "See enrichment_errors tab in Sheet."
+                )
+    if results:
+        st.info(
+            'Go to Watch List, enable "Enriched only" filter, '
+            "and click Reload from Sheet to see results."
+        )
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # TAB 1 -- UPLOAD
 # ─────────────────────────────────────────────────────────────────────────────
@@ -593,6 +894,32 @@ def tab_upload(sh):
         )
         if st.button("Apply Tier 1 overrides", key="apply_tier1"):
             _apply_tier1_overrides(sh)
+
+        st.markdown("---")
+        st.markdown("**ICP enrichment**")
+        st.caption(
+            "Fetches each company's homepage, extracts visible text, and uses "
+            "Claude Haiku to classify industry, ICP label, and confidence. "
+            "Results write to master_companies. Errors log to enrichment_errors tab."
+        )
+        enrich_mode = st.radio(
+            "Enrich which domains?",
+            ["Flagged only (enrich = True)", "All Tier 1 (unenriched)", "All unenriched"],
+            index=0,
+            key="enrich_mode_radio",
+            help=(
+                "Flagged only: safe for targeted runs. "
+                "All Tier 1: enriches all ~418 T1 domains (~70 min). "
+                "All unenriched: runs on the full ~4,800 list -- may take 12+ hours."
+            ),
+        )
+        _mode_map = {
+            "Flagged only (enrich = True)": "flagged",
+            "All Tier 1 (unenriched)": "tier1",
+            "All unenriched": "all",
+        }
+        if st.button("Run enrichment", key="run_enrichment", type="primary"):
+            _run_enrichment(sh, mode=_mode_map[enrich_mode])
         return
 
     st.write(f"**{len(uploaded_files)} file(s) ready to process:**")
