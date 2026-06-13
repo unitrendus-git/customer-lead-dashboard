@@ -933,6 +933,9 @@ def tab_ham(sh) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def main() -> None:
+    # ── TEMPORARY DIAGNOSTIC — remove after Sheets connection confirmed ──
+    from diag import diag_sheets
+    diag_sheets()
     # ── header ──
     st.markdown(
         """
