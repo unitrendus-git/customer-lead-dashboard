@@ -582,14 +582,12 @@ def _render_upload_summary(results: list) -> None:
 # CUSTOMER BACKFILL
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _backfill_customers(sh) -> None:
+def _backfill_customers(sh, silent: bool = False) -> None:
     """
     Read order_history tab, aggregate spend per domain, then batch-update
     customer_status = 'customer', total_spent, total_orders, has_purchases
     in BOTH master_companies and new_contacts.
-
-    This is the repair tool for when the order upload's inline sync silently
-    failed. Reads order_history as the authoritative source of truth.
+    silent=True suppresses st.info/st.success output (used during auto-trigger after upload).
     """
     with st.spinner("Reading order history…"):
         order_rows = sheet_get_all(sh, SHEET_ORDERS)
@@ -624,7 +622,8 @@ def _backfill_customers(sh) -> None:
         domain_stats[d]["total_orders"] = len(domain_stats[d]["order_nums"])
 
     n_domains = len(domain_stats)
-    st.info(f"Found {n_domains:,} domains with purchase history. Updating sheets…")
+    if not silent:
+        st.info(f"Found {n_domains:,} domains with purchase history. Updating sheets…")
 
     # ── Update master_companies ──────────────────────────────────────────
     try:
@@ -648,9 +647,11 @@ def _backfill_customers(sh) -> None:
                 mc_hit += 1
             if mc_updates:
                 _batch_update(ws, mc_updates)
-        st.success(f"✅ master_companies: updated {mc_hit:,} domains")
+        if not silent:
+            st.success(f"✅ master_companies: updated {mc_hit:,} domains")
     except Exception as ex:
-        st.error(f"master_companies update failed: {ex}")
+        if not silent:
+            st.error(f"master_companies update failed: {ex}")
         return
 
     # ── Update new_contacts ─────────────────────────────────────────────
@@ -706,11 +707,14 @@ def _backfill_customers(sh) -> None:
                     nc_ws.spreadsheet.values_batch_update(body)
                     time.sleep(0.5)
 
-        st.success(f"✅ new_contacts: updated {nc_hit:,} domains ({len(nc_updates):,} cells)")
+        if not silent:
+            st.success(f"✅ new_contacts: updated {nc_hit:,} domains ({len(nc_updates):,} cells)")
         st.session_state["nc_cache_dirty"] = True
-        st.info("→ Go to New Contacts tab and click \"Reload from Sheet\" to see updated counts.")
+        if not silent:
+            st.info("→ Go to New Contacts tab and click \"Reload from Sheet\" to see updated counts.")
     except Exception as ex:
-        st.error(f"new_contacts update failed: {ex}")
+        if not silent:
+            st.error(f"new_contacts update failed: {ex}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -805,6 +809,10 @@ def tab_upload(sh) -> None:
             file_result = _write_order_results(
                 sh, result, f.name, progress, pct_base, len(uploaded_files)
             )
+            # Auto-backfill after every orders upload to sync customer_status
+            if file_result.get("orders_written", 0) > 0:
+                progress.progress(1.0, text="Syncing customer status…")
+                _backfill_customers(sh, silent=True)
 
         session_results.append(file_result)
 
