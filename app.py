@@ -568,6 +568,123 @@ def _render_upload_summary(results: list) -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# CUSTOMER BACKFILL
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _backfill_customers(sh) -> None:
+    """
+    Read order_history tab, aggregate spend per domain, then batch-update
+    customer_status = 'customer', total_spent, total_orders, has_purchases
+    in BOTH master_companies and new_contacts.
+
+    This is the repair tool for when the order upload's inline sync silently
+    failed. Reads order_history as the authoritative source of truth.
+    """
+    with st.spinner("Reading order history…"):
+        order_rows = sheet_get_all(sh, SHEET_ORDERS)
+
+    if not order_rows:
+        st.warning("No rows found in order_history tab.")
+        return
+
+    # Aggregate spend per domain from order_history
+    # ORDER_HEADERS: domain, order_number, order_date, product_name, sku,
+    #                line_item_price, quantity, order_total, fulfillment_status,
+    #                financial_status, billing_company, billing_email
+    domain_stats: dict = {}
+    for row in order_rows:
+        domain = str(row.get("domain", "")).strip().lower()
+        if not domain:
+            continue
+        order_num = str(row.get("order_number", "")).strip()
+        try:
+            order_total = float(str(row.get("order_total") or 0))
+        except (ValueError, TypeError):
+            order_total = 0.0
+
+        if domain not in domain_stats:
+            domain_stats[domain] = {"total_spent": 0.0, "order_nums": set()}
+        if order_num and order_num not in domain_stats[domain]["order_nums"]:
+            domain_stats[domain]["total_spent"]  += order_total
+            domain_stats[domain]["order_nums"].add(order_num)
+
+    # Finalize order counts
+    for d in domain_stats:
+        domain_stats[d]["total_orders"] = len(domain_stats[d]["order_nums"])
+
+    n_domains = len(domain_stats)
+    st.info(f"Found {n_domains:,} domains with purchase history. Updating sheets…")
+
+    # ── Update master_companies ──────────────────────────────────────────
+    try:
+        with st.spinner("Updating master_companies…"):
+            ws, col, dom_idx = _sheet_index(sh)
+            mc_updates = []
+            mc_hit = 0
+            for domain, stats in domain_stats.items():
+                if domain not in dom_idx:
+                    continue
+                r = dom_idx[domain]
+                spent = _sanitize_value(round(stats["total_spent"], 2))
+                for field, value in [
+                    ("customer_status", "customer"),
+                    ("has_purchases",   "True"),
+                    ("total_spent",     spent),
+                    ("total_orders",    stats["total_orders"]),
+                ]:
+                    if field in col:
+                        mc_updates.append((r + 1, col[field] + 1, value))
+                mc_hit += 1
+            if mc_updates:
+                _batch_update(ws, mc_updates)
+        st.success(f"✅ master_companies: updated {mc_hit:,} domains")
+    except Exception as ex:
+        st.error(f"master_companies update failed: {ex}")
+        return
+
+    # ── Update new_contacts ─────────────────────────────────────────────
+    try:
+        with st.spinner("Updating new_contacts…"):
+            nc_ws   = sh.worksheet(SHEET_NEW_CONTACTS)
+            nc_vals = nc_ws.get_all_values()
+            if not nc_vals:
+                st.warning("new_contacts tab is empty.")
+                return
+            nc_hdrs = nc_vals[0]
+
+            def _col(name):
+                return nc_hdrs.index(name) + 1 if name in nc_hdrs else None
+
+            dom_c    = nc_hdrs.index("domain") if "domain" in nc_hdrs else 0
+            status_c = _col("customer_status")
+            spent_c  = _col("total_spent")
+            orders_c = _col("total_orders")
+
+            nc_updates = []
+            nc_hit = 0
+            for i, row_vals in enumerate(nc_vals[1:], start=2):
+                d = row_vals[dom_c].strip().lower()
+                if d not in domain_stats:
+                    continue
+                s = domain_stats[d]
+                if status_c:
+                    nc_updates.append((i, status_c, "customer"))
+                if spent_c:
+                    nc_updates.append((i, spent_c, round(s["total_spent"], 2)))
+                if orders_c:
+                    nc_updates.append((i, orders_c, s["total_orders"]))
+                nc_hit += 1
+
+            if nc_updates:
+                _batch_update(nc_ws, nc_updates)
+        st.success(f"✅ new_contacts: updated {nc_hit:,} domains")
+        st.session_state["nc_cache_dirty"] = True
+        st.info("→ Go to New Contacts tab and click \"Reload from Sheet\" to see updated counts.")
+    except Exception as ex:
+        st.error(f"new_contacts update failed: {ex}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # TAB 1 — UPLOAD
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -592,6 +709,15 @@ def tab_upload(sh) -> None:
 
     if not uploaded_files:
         st.info("No files selected yet. Drag one or more files above to begin.")
+
+        # ── Backfill button (shown when no file is queued) ──────────────────────
+        st.markdown("---")
+        st.markdown("**🔧 Data repair tools**")
+        st.caption(
+            "Use these if customer status or spend data looks wrong after uploading orders."
+        )
+        if st.button("🔄 Backfill customer status from order history", key="backfill_customers"):
+            _backfill_customers(sh)
         return
 
     st.write(f"**{len(uploaded_files)} file(s) ready to process:**")
