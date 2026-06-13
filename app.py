@@ -882,119 +882,280 @@ def _nc_mark_reviewed(sh, domains: list) -> bool:
         return False
 
 
+def _nc_safe_str(v) -> str:
+    """Return string form of v, collapsing None/nan/float-nan to empty string."""
+    if v is None:
+        return ""
+    s = str(v)
+    return "" if s.lower() == "nan" else s
+
+
+def _nc_load(sh) -> list:
+    """
+    Load new_contacts from Sheet and cache in session_state.
+    Refresh forced by setting st.session_state['nc_cache_dirty'] = True before rerun.
+    """
+    if (
+        "nc_rows_cache" not in st.session_state
+        or st.session_state.get("nc_cache_dirty")
+    ):
+        with st.spinner("Loading contacts from Sheet…"):
+            rows = sheet_get_all(sh, SHEET_NEW_CONTACTS)
+        st.session_state["nc_rows_cache"] = rows
+        st.session_state["nc_cache_dirty"] = False
+    return st.session_state["nc_rows_cache"]
+
+
 def tab_new_contacts(sh) -> None:
     st.header("New Contacts")
     st.caption(
-        "Companies added since the last upload that haven't been reviewed yet. "
-        "Set monitor and enrich flags, then mark each row reviewed to clear the queue."
+        "All companies in the system — filter to unreviewed, customers, or by segment. "
+        "Set monitor and enrich flags, then mark reviewed to clear the queue."
     )
 
-    # ── Load data ────────────────────────────────────────────────────────────
-    with st.spinner("Loading new contacts…"):
-        all_rows = sheet_get_all(sh, SHEET_NEW_CONTACTS)
+    # ── Load (cached in session_state — filter changes don't re-hit the Sheet) ──
+    all_rows   = _nc_load(sh)
+    total_rows = len(all_rows)
 
-    unreviewed = [r for r in all_rows if str(r.get("reviewed", "")).strip() != "True"]
-
-    if not unreviewed:
-        st.success("✅ Queue clear — no unreviewed contacts.")
-        if st.button("🔄 Refresh"):
-            st.rerun()
+    if not all_rows:
+        st.info("No contacts loaded yet. Upload a file on the Upload tab first.")
         return
 
-    # ── Sidebar filters ───────────────────────────────────────────────────────
+    # Pre-compute safe fields for every row once, not inside the render loop
+    prepped = []
+    for r in all_rows:
+        domain  = _nc_safe_str(r.get("domain"))
+        company = _nc_safe_str(r.get("company_name")) or domain
+        cls     = _nc_safe_str(r.get("domain_class")) or "commercial"
+        status  = _nc_safe_str(r.get("customer_status")) or "prospect"
+        tags    = _nc_safe_str(r.get("tags"))
+        try:
+            spent_raw = float(str(r.get("total_spent") or 0))
+        except (ValueError, TypeError):
+            spent_raw = 0.0
+        try:
+            orders_raw = int(float(str(r.get("total_orders") or 0)))
+        except (ValueError, TypeError):
+            orders_raw = 0
+        prepped.append({
+            "domain":      domain,
+            "company":     company,
+            "cls":         cls,
+            "status":      status,
+            "spent_raw":   spent_raw,
+            "orders_raw":  orders_raw,
+            "tags":        tags,
+            "has_event":   _nc_safe_str(r.get("has_event_tag")).strip() == "True",
+            "contact_n":   _nc_safe_str(r.get("best_contact_name")),
+            "contact_e":   _nc_safe_str(r.get("best_contact_email")),
+            "first_seen":  _nc_safe_str(r.get("first_seen")),
+            "added_date":  _nc_safe_str(r.get("added_date")),
+            "monitor_cur": _nc_safe_str(r.get("monitor", "True")).strip() == "True",
+            "enrich_cur":  _nc_safe_str(r.get("enrich",  "False")).strip() == "True",
+            "reviewed":    _nc_safe_str(r.get("reviewed")).strip() == "True",
+            "_raw":        r,
+        })
+
+    available_classes = sorted({p["cls"] for p in prepped if p["cls"]})
+    has_customers     = any(p["status"] == "customer" for p in prepped)
+    has_purchases     = any(p["spent_raw"] > 0 for p in prepped)
+
+    # ── Sidebar filters (no Sheet I/O on change) ──────────────────────────────
     with st.sidebar:
-        st.markdown("### 🔍 Filter New Contacts")
+        st.markdown("### 🔍 Filter Contacts")
+
+        show_filter = st.radio(
+            "Show",
+            ["Unreviewed only", "All contacts", "Reviewed only"],
+            index=0,
+            key="nc_show_filter",
+        )
 
         status_filter = st.radio(
             "Customer status",
-            ["All", "Customers only", "Prospects only"],
+            ["All", "Customers", "Prospects"],
             index=0,
             key="nc_status_filter",
         )
 
-        available_classes = sorted(
-            {r.get("domain_class", "") for r in unreviewed if r.get("domain_class")}
-        )
         class_filter = st.multiselect(
-            "Domain class",
+            "Segment",
             options=available_classes,
-            default=available_classes,
+            default=[],
+            placeholder="All segments",
             key="nc_class_filter",
         )
 
-    # ── Apply filters ─────────────────────────────────────────────────────────
-    filtered = unreviewed
-    if status_filter == "Customers only":
-        filtered = [r for r in filtered if r.get("customer_status") == "customer"]
-    elif status_filter == "Prospects only":
-        filtered = [r for r in filtered if r.get("customer_status") != "customer"]
-    if class_filter:
-        filtered = [r for r in filtered if r.get("domain_class", "") in class_filter]
+        has_purchase_only = st.checkbox(
+            "Has purchases", value=False, key="nc_has_purchase"
+        )
+        has_event_only = st.checkbox(
+            "Has event tag", value=False, key="nc_has_event"
+        )
+
+        st.markdown("---")
+        sort_by = st.selectbox(
+            "Sort by",
+            ["Date added (newest)", "Date added (oldest)",
+             "Company name (A–Z)", "Total spend (high–low)"],
+            key="nc_sort",
+        )
+
+        st.markdown("---")
+        if st.button("🔄 Reload from Sheet", key="nc_reload"):
+            st.session_state["nc_cache_dirty"] = True
+            st.rerun()
+
+    # ── Apply filters (pure Python — instant) ─────────────────────────────────
+    view = prepped
+
+    if show_filter == "Unreviewed only":
+        view = [p for p in view if not p["reviewed"]]
+    elif show_filter == "Reviewed only":
+        view = [p for p in view if p["reviewed"]]
+
+    if status_filter == "Customers":
+        view = [p for p in view if p["status"] == "customer"]
+    elif status_filter == "Prospects":
+        view = [p for p in view if p["status"] != "customer"]
+
+    if class_filter:  # empty list = all
+        view = [p for p in view if p["cls"] in class_filter]
+
+    if has_purchase_only:
+        view = [p for p in view if p["spent_raw"] > 0]
+
+    if has_event_only:
+        view = [p for p in view if p["has_event"]]
+
+    # ── Sort ──────────────────────────────────────────────────────────────────
+    if sort_by == "Date added (oldest)":
+        view = sorted(view, key=lambda p: p["added_date"] or p["first_seen"])
+    elif sort_by == "Company name (A–Z)":
+        view = sorted(view, key=lambda p: p["company"].lower())
+    elif sort_by == "Total spend (high–low)":
+        view = sorted(view, key=lambda p: -p["spent_raw"])
+    # default: newest first (preserve Sheet order, which is append order)
 
     # ── Summary bar ───────────────────────────────────────────────────────────
-    col_a, col_b, col_c, col_d = st.columns(4)
-    col_a.metric("Unreviewed", len(unreviewed))
-    col_b.metric("Showing", len(filtered))
-    col_c.metric(
-        "Customers",
-        sum(1 for r in filtered if r.get("customer_status") == "customer"),
-    )
-    col_d.metric(
-        "Monitor flagged",
-        sum(1 for r in filtered if str(r.get("monitor", "")) == "True"),
-    )
+    n_unreviewed = sum(1 for p in prepped if not p["reviewed"])
+    n_customers  = sum(1 for p in prepped if p["status"] == "customer")
+    n_with_spend = sum(1 for p in prepped if p["spent_raw"] > 0)
+
+    m1, m2, m3, m4, m5 = st.columns(5)
+    m1.metric("Total in system",  f"{total_rows:,}")
+    m2.metric("Unreviewed",       f"{n_unreviewed:,}")
+    m3.metric("Customers",        f"{n_customers:,}")
+    m4.metric("With purchases",   f"{n_with_spend:,}")
+    m5.metric("Showing now",      f"{len(view):,}")
 
     st.markdown("---")
 
-    if not filtered:
+    if not view:
         st.info("No contacts match the current filters.")
         return
 
-    # ── Bulk action ───────────────────────────────────────────────────────────
-    if st.button(
-        f"✅ Mark all {len(filtered):,} shown as reviewed",
-        key="nc_mark_all",
-        type="secondary",
-    ):
-        domains_to_clear = [r["domain"] for r in filtered if r.get("domain")]
-        with st.spinner(f"Marking {len(domains_to_clear):,} rows reviewed…"):
-            ok = _nc_mark_reviewed(sh, domains_to_clear)
-        if ok:
-            st.success(f"Marked {len(domains_to_clear):,} contacts as reviewed.")
-            st.rerun()
+    # ── Bulk action (only for unreviewed view) ────────────────────────────────
+    unreviewed_in_view = [p for p in view if not p["reviewed"]]
+    if unreviewed_in_view:
+        if st.button(
+            f"✅ Mark all {len(unreviewed_in_view):,} shown as reviewed",
+            key="nc_mark_all",
+            type="secondary",
+        ):
+            domains_to_clear = [p["domain"] for p in unreviewed_in_view if p["domain"]]
+            with st.spinner(f"Marking {len(domains_to_clear):,} rows reviewed…"):
+                ok = _nc_mark_reviewed(sh, domains_to_clear)
+            if ok:
+                st.success(f"Marked {len(domains_to_clear):,} contacts reviewed.")
+                st.session_state["nc_cache_dirty"] = True
+                st.rerun()
 
-    st.markdown(f"**{len(filtered):,} contact(s) awaiting review** — expand a row to act on it.")
+    st.markdown(
+        f"**{len(view):,} contact(s)** · "
+        f"sorted by {sort_by.lower()}"
+    )
+    st.markdown("")
+
+    # ── Class color legend (compact) ──────────────────────────────────────────
+    legend_html = " &nbsp; ".join(
+        f'<span style="background:{CLASS_COLOR[c]};color:#fff;padding:1px 7px;'
+        f'border-radius:3px;font-size:0.73rem;">{CLASS_LABEL[c]}</span>'
+        for c in available_classes if c in CLASS_COLOR
+    )
+    st.markdown(legend_html, unsafe_allow_html=True)
     st.markdown("")
 
     # ── Per-row expanders ─────────────────────────────────────────────────────
-    for idx, row in enumerate(filtered):
-        domain      = row.get("domain", "")
-        company     = row.get("company_name") or domain
-        cls         = row.get("domain_class", "commercial")
-        status      = row.get("customer_status", "prospect")
-        spent       = format_currency(row.get("total_spent", 0))
-        orders      = row.get("total_orders", 0)
-        tags        = str(row.get("tags") or "")
-        has_event   = str(row.get("has_event_tag", "")).strip() == "True"
-        contact_n   = row.get("best_contact_name", "")
-        contact_e   = row.get("best_contact_email", "")
-        first_seen  = row.get("first_seen", "")
-        added_date  = row.get("added_date", "")
-        monitor_cur = str(row.get("monitor", "True")).strip() == "True"
-        enrich_cur  = str(row.get("enrich",  "False")).strip() == "True"
+    for idx, p in enumerate(view):
+        domain      = p["domain"]
+        company     = p["company"]
+        cls         = p["cls"]
+        status      = p["status"]
+        spent_raw   = p["spent_raw"]
+        orders_raw  = p["orders_raw"]
+        tags        = p["tags"]
+        has_event   = p["has_event"]
+        contact_n   = p["contact_n"]
+        contact_e   = p["contact_e"]
+        first_seen  = p["first_seen"]
+        added_date  = p["added_date"]
+        monitor_cur = p["monitor_cur"]
+        enrich_cur  = p["enrich_cur"]
+        reviewed    = p["reviewed"]
 
-        # Expander label: company name + class badge + spend if customer
-        spend_label = f" · {spent}" if status == "customer" else ""
-        expander_label = f"{company}  ·  {domain}{spend_label}"
+        # ── Expander label: dense at-a-glance summary ────────────────────────
+        cls_dot_color = CLASS_COLOR.get(cls, "#546E7A")
+        cls_dot  = (
+            f'<span style="display:inline-block;width:10px;height:10px;'
+            f'border-radius:50%;background:{cls_dot_color};margin-right:4px;"></span>'
+        )
+        if spent_raw > 0:
+            spend_pill = (
+                f' <span style="background:#1B5E20;color:#fff;padding:1px 6px;'
+                f'border-radius:3px;font-size:0.72rem;font-weight:600;">'
+                f'{format_currency(spent_raw)}</span>'
+            )
+        else:
+            spend_pill = ""
 
+        if has_event:
+            event_pill = (
+                ' <span style="background:#E65100;color:#fff;padding:1px 6px;'
+                'border-radius:3px;font-size:0.72rem;">event</span>'
+            )
+        else:
+            event_pill = ""
+
+        rev_indicator = " ✓" if reviewed else ""
+        label_html = (
+            f"{cls_dot}<b>{company}</b> &nbsp;"
+            f"<span style='color:#888;font-size:0.85rem;'>{domain}</span>"
+            f"{spend_pill}{event_pill}{rev_indicator}"
+        )
+        # st.expander doesn't accept HTML in its label, so we render a
+        # markdown summary line above the expander as the visual signal row
+        st.markdown(
+            f'<div style="margin-bottom:-10px;padding:4px 2px;font-size:0.88rem;">'
+            f'{label_html}</div>',
+            unsafe_allow_html=True,
+        )
+
+        expander_label = f"{company}  ·  {domain}"
         with st.expander(expander_label, expanded=False):
 
-            # Top row: badge + status indicator
-            badge_html = _nc_class_badge(cls)
+            # Top row: segment badge + status
+            badge_html  = _nc_class_badge(cls)
             status_icon = "🟢" if status == "customer" else "⚪"
+            rev_badge   = (
+                '<span style="background:#4CAF50;color:#fff;padding:1px 7px;'
+                'border-radius:3px;font-size:0.75rem;margin-left:8px;">reviewed</span>'
+                if reviewed else ""
+            )
             st.markdown(
                 f"{badge_html} &nbsp; {status_icon} &nbsp;"
-                f"<span style='font-size:0.85rem;color:#555;'>{status.title()}</span>",
+                f"<span style='font-size:0.85rem;color:#555;'>{status.title()}</span>"
+                f"{rev_badge}",
                 unsafe_allow_html=True,
             )
             st.markdown("")
@@ -1004,7 +1165,8 @@ def tab_new_contacts(sh) -> None:
             with d1:
                 st.markdown("**Domain**")
                 st.code(domain, language=None)
-                st.markdown(f"**First seen:** {first_seen or added_date or '—'}")
+                date_label = first_seen or added_date or "—"
+                st.markdown(f"**Added:** {date_label}")
             with d2:
                 st.markdown("**Best contact**")
                 st.write(contact_n or "—")
@@ -1012,8 +1174,10 @@ def tab_new_contacts(sh) -> None:
                     st.caption(contact_e)
             with d3:
                 st.markdown("**Purchase data**")
-                st.write(f"{spent} across {orders} order(s)" if int(orders or 0) > 0
-                         else "No purchases on record")
+                if orders_raw > 0:
+                    st.write(f"{format_currency(spent_raw)} across {orders_raw} order(s)")
+                else:
+                    st.write("No purchases on record")
                 if tags:
                     tag_list = ", ".join(t.strip() for t in tags.split(",") if t.strip())
                     st.caption(f"Tags: {tag_list}")
@@ -1022,21 +1186,21 @@ def tab_new_contacts(sh) -> None:
 
             st.markdown("")
 
-            # Toggles — writes immediately on change
+            # Action row: toggles + mark reviewed button
             t1, t2, t3 = st.columns([1, 1, 2])
             with t1:
                 new_monitor = st.checkbox(
                     "Monitor",
                     value=monitor_cur,
                     key=f"nc_mon_{idx}_{domain}",
-                    help="Add this domain to the active signal-monitoring queue.",
+                    help="Add to the active signal-monitoring queue.",
                 )
             with t2:
                 new_enrich = st.checkbox(
                     "Enrich",
                     value=enrich_cur,
                     key=f"nc_enr_{idx}_{domain}",
-                    help="Queue this domain for homepage scrape + ICP classification.",
+                    help="Queue for homepage scrape + ICP classification.",
                 )
 
             flags_changed = (new_monitor != monitor_cur) or (new_enrich != enrich_cur)
@@ -1044,17 +1208,27 @@ def tab_new_contacts(sh) -> None:
                 with st.spinner("Saving flags…"):
                     _nc_write_master_flags(sh, domain, new_monitor, new_enrich)
                     _nc_write_nc_flags(sh, all_rows, domain, new_monitor, new_enrich)
+                # Update cache in-place so the change survives without a Sheet reload
+                for cached_p in st.session_state.get("nc_rows_cache", []):
+                    if cached_p.get("domain") == domain:
+                        cached_p["monitor"] = str(new_monitor)
+                        cached_p["enrich"]  = str(new_enrich)
+                        break
                 st.toast(f"Flags updated for {company}.", icon="✅")
 
             with t3:
-                if st.button(
-                    "✅ Mark reviewed",
-                    key=f"nc_rev_{idx}_{domain}",
-                    type="primary",
-                ):
-                    with st.spinner("Marking reviewed…"):
-                        _nc_mark_reviewed(sh, [domain])
-                    st.rerun()
+                if not reviewed:
+                    if st.button(
+                        "✅ Mark reviewed",
+                        key=f"nc_rev_{idx}_{domain}",
+                        type="primary",
+                    ):
+                        with st.spinner("Marking reviewed…"):
+                            _nc_mark_reviewed(sh, [domain])
+                        st.session_state["nc_cache_dirty"] = True
+                        st.rerun()
+                else:
+                    st.caption("✓ Already reviewed")
 
 
 def tab_watch_list(sh) -> None:
