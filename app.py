@@ -866,7 +866,7 @@ def _run_enrichment(sh, mode: str = "flagged") -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def tab_upload(sh):
-    st.header("Upload Contact & Order Data")
+    st.header("Data")
     st.caption("Accepts Brevo CSV exports, Shopify contact XLSX exports, and Shopify order CSV exports. "
                "File type is detected automatically from column headers.")
 
@@ -1852,7 +1852,7 @@ def main():
                  "Streamlit Cloud - Settings - Secrets.")
         st.stop()
 
-    tabs = st.tabs(["Upload", "New Contacts", "Watch List", "HAM"])
+    tabs = st.tabs(["Data", "New Contacts", "Watch List", "HAM"])
     with tabs[0]: tab_upload(sh)
     with tabs[1]: tab_new_contacts(sh)
     with tabs[2]: tab_watch_list(sh)
