@@ -927,6 +927,26 @@ def _nc_safe_str(v) -> str:
     return s
 
 
+def _nc_safe_bool(v, default: bool = False) -> bool:
+    """
+    Parse a Sheet boolean string case-insensitively.
+    Sheets auto-uppercases USER_ENTERED booleans: 'TRUE'/'FALSE'.
+    We also write 'True'/'False' from Python. Handle both.
+    """
+    if isinstance(v, bool):
+        return v
+    return str(v).strip().upper() == "TRUE"
+
+
+def _nc_strip_trailing_nan(s: str) -> str:
+    """Strip leading/trailing nan tokens from a name. 'Maxwell nan' -> 'Maxwell'."""
+    import re as _re
+    s = _re.sub(r'(?i)\s*\bnan\b\s*$', '', s).strip()
+    s = _re.sub(r'(?i)^\s*\bnan\b\s*', '', s).strip()
+    s = _re.sub(r'  +', ' ', s).strip()
+    return s
+
+
 def _nc_infer_name_from_email(email: str) -> str:
     """
     Extract a best-guess display name from an email local-part.
@@ -954,22 +974,15 @@ def _nc_infer_name_from_email(email: str) -> str:
 
 def _nc_completeness(p: dict) -> int:
     """
-    Score a prepped contact row 0-5 based on data richness.
+    Score a prepped contact row 0-6 based on data richness.
     Used for ranking: higher = more actionable.
-      +1  has best_contact_name (real, not inferred)
-      +1  has best_contact_email
-      +1  has best_contact_title
-      +1  has company_name (not just domain fallback)
-      +1  has tags
-      +1  has purchases
-    Max 6; display as filled dots out of 6.
     """
     score = 0
-    if p.get("contact_n_real"):   score += 1   # name from source, not inferred
-    if p.get("contact_e"):        score += 1
-    if p.get("contact_title"):    score += 1
-    if p.get("company_real"):     score += 1   # company from source, not domain fallback
-    if p.get("tags"):             score += 1
+    if p.get("contact_n_real"):    score += 1
+    if p.get("contact_e"):         score += 1
+    if p.get("contact_title"):     score += 1
+    if p.get("company_real"):      score += 1
+    if p.get("tags"):              score += 1
     if p.get("spent_raw", 0) > 0: score += 1
     return score
 
@@ -1015,24 +1028,23 @@ def tab_new_contacts(sh) -> None:
     # Pre-compute safe fields for every row once, not inside the render loop
     prepped = []
     for r in all_rows:
-        domain       = _nc_safe_str(r.get("domain"))
-        company_raw  = _nc_safe_str(r.get("company_name"))
-        company_real = bool(company_raw)          # True = came from source data
-        company      = company_raw or domain
-        cls          = _nc_safe_str(r.get("domain_class")) or "commercial"
-        status       = _nc_safe_str(r.get("customer_status")) or "prospect"
-        tags         = _nc_safe_str(r.get("tags"))
-        contact_e    = _nc_safe_str(r.get("best_contact_email"))
+        domain        = _nc_safe_str(r.get("domain"))
+        company_raw   = _nc_safe_str(r.get("company_name"))
+        company_real  = bool(company_raw)
+        company       = company_raw or domain
+        cls           = _nc_safe_str(r.get("domain_class")) or "commercial"
+        status        = _nc_safe_str(r.get("customer_status")) or "prospect"
+        tags          = _nc_safe_str(r.get("tags"))
+        contact_e     = _nc_safe_str(r.get("best_contact_email"))
         contact_title = _nc_safe_str(r.get("best_contact_title"))
 
         # Name: use source value if clean; otherwise infer from email
-        contact_n_raw  = _nc_safe_str(r.get("best_contact_name"))
-        contact_n_real = bool(contact_n_raw)      # True = came from source data
+        contact_n_raw  = _nc_strip_trailing_nan(_nc_safe_str(r.get("best_contact_name")))
+        contact_n_real = bool(contact_n_raw)
         if contact_n_raw:
             contact_n = contact_n_raw
         else:
-            inferred  = _nc_infer_name_from_email(contact_e)
-            contact_n = inferred   # may still be "" if email not parseable
+            contact_n = _nc_infer_name_from_email(contact_e)
 
         try:
             spent_raw = float(str(r.get("total_spent") or 0))
@@ -1059,17 +1071,15 @@ def tab_new_contacts(sh) -> None:
             "contact_title":  contact_title,
             "first_seen":     _nc_safe_str(r.get("first_seen")),
             "added_date":     _nc_safe_str(r.get("added_date")),
-            "monitor_cur":    _nc_safe_str(r.get("monitor", "True")).strip() == "True",
-            "enrich_cur":     _nc_safe_str(r.get("enrich",  "False")).strip() == "True",
-            "reviewed":       _nc_safe_str(r.get("reviewed")).strip() == "True",
+            "monitor_cur":    _nc_safe_bool(r.get("monitor", "True"),  default=True),
+            "enrich_cur":     _nc_safe_bool(r.get("enrich",  "False"), default=False),
+            "reviewed":       _nc_safe_bool(r.get("reviewed"),         default=False),
             "_raw":           r,
         }
         p["completeness"] = _nc_completeness(p)
         prepped.append(p)
 
     available_classes = sorted({p["cls"] for p in prepped if p["cls"]})
-    has_customers     = any(p["status"] == "customer" for p in prepped)
-    has_purchases     = any(p["spent_raw"] > 0 for p in prepped)
 
     # ── Sidebar filters (no Sheet I/O on change) ──────────────────────────────
     with st.sidebar:
@@ -1133,7 +1143,7 @@ def tab_new_contacts(sh) -> None:
     elif status_filter == "Prospects":
         view = [p for p in view if p["status"] != "customer"]
 
-    if class_filter:  # empty list = all
+    if class_filter:
         view = [p for p in view if p["cls"] in class_filter]
 
     if has_purchase_only:
@@ -1151,7 +1161,6 @@ def tab_new_contacts(sh) -> None:
         view = sorted(view, key=lambda p: p["company"].lower())
     elif sort_by == "Total spend (high–low)":
         view = sorted(view, key=lambda p: -p["spent_raw"])
-    # default: newest first (preserve Sheet order, which is append order)
 
     # ── Summary bar ───────────────────────────────────────────────────────────
     n_unreviewed = sum(1 for p in prepped if not p["reviewed"])
@@ -1171,7 +1180,7 @@ def tab_new_contacts(sh) -> None:
         st.info("No contacts match the current filters.")
         return
 
-    # ── Bulk action (only for unreviewed view) ───────────────────────────────
+    # ── Bulk action ───────────────────────────────────────────────────────────
     unreviewed_in_view = [p for p in view if not p["reviewed"]]
     if unreviewed_in_view:
         if st.button(
@@ -1187,9 +1196,7 @@ def tab_new_contacts(sh) -> None:
                 st.session_state["nc_cache_dirty"] = True
                 st.rerun()
 
-    # ── Pagination ───────────────────────────────────────────────────────────────
-    # Fingerprint the current filter+sort state. When it changes, snap back
-    # to page 0 so the user never lands mid-list after a filter change.
+    # ── Pagination ────────────────────────────────────────────────────────────
     filter_fp = (
         f"{show_filter}|{status_filter}|{sorted(class_filter)}"
         f"|{has_purchase_only}|{has_event_only}|{sort_by}"
@@ -1205,7 +1212,6 @@ def tab_new_contacts(sh) -> None:
     end_idx     = start_idx + NC_PAGE_SIZE
     page_view   = view[start_idx:end_idx]
 
-    # Page header
     st.markdown(
         f"**{len(view):,} contact(s)** · sorted by {sort_by.lower()} · "
         f"page {page + 1} of {total_pages} "
@@ -1213,7 +1219,7 @@ def tab_new_contacts(sh) -> None:
     )
     st.markdown("")
 
-    # ── Class color legend (compact) ──────────────────────────────────────────
+    # ── Class color legend ────────────────────────────────────────────────────
     legend_html = " &nbsp; ".join(
         f'<span style="background:{CLASS_COLOR[c]};color:#fff;padding:1px 7px;'
         f'border-radius:3px;font-size:0.73rem;">{CLASS_LABEL[c]}</span>'
@@ -1222,54 +1228,48 @@ def tab_new_contacts(sh) -> None:
     st.markdown(legend_html, unsafe_allow_html=True)
     st.markdown("")
 
-    # ── Per-row expanders (this page only) ──────────────────────────────────
+    # ── Per-row expanders (this page only) ────────────────────────────────────
     for idx, p in enumerate(page_view):
-        abs_idx = start_idx + idx  # stable key across pages
-        domain      = p["domain"]
-        company     = p["company"]
-        cls         = p["cls"]
-        status      = p["status"]
-        spent_raw   = p["spent_raw"]
-        orders_raw  = p["orders_raw"]
-        tags        = p["tags"]
-        has_event   = p["has_event"]
-        contact_n   = p["contact_n"]
+        abs_idx       = start_idx + idx
+        domain        = p["domain"]
+        company       = p["company"]
+        cls           = p["cls"]
+        status        = p["status"]
+        spent_raw     = p["spent_raw"]
+        orders_raw    = p["orders_raw"]
+        tags          = p["tags"]
+        has_event     = p["has_event"]
+        contact_n     = p["contact_n"]
         contact_n_real = p["contact_n_real"]
-        contact_e   = p["contact_e"]
+        contact_e     = p["contact_e"]
         contact_title = p["contact_title"]
-        first_seen  = p["first_seen"]
-        added_date  = p["added_date"]
-        monitor_cur = p["monitor_cur"]
-        enrich_cur  = p["enrich_cur"]
-        reviewed    = p["reviewed"]
+        first_seen    = p["first_seen"]
+        added_date    = p["added_date"]
+        monitor_cur   = p["monitor_cur"]
+        enrich_cur    = p["enrich_cur"]
+        reviewed      = p["reviewed"]
 
-        # ── Expander label: dense at-a-glance summary ────────────────────────
         cls_dot_color = CLASS_COLOR.get(cls, "#546E7A")
-        cls_dot  = (
+        cls_dot = (
             f'<span style="display:inline-block;width:10px;height:10px;'
             f'border-radius:50%;background:{cls_dot_color};margin-right:4px;"></span>'
         )
-        if spent_raw > 0:
-            spend_pill = (
-                f' <span style="background:#1B5E20;color:#fff;padding:1px 6px;'
-                f'border-radius:3px;font-size:0.72rem;font-weight:600;">'
-                f'{format_currency(spent_raw)}</span>'
-            )
-        else:
-            spend_pill = ""
+        spend_pill = (
+            f' <span style="background:#1B5E20;color:#fff;padding:1px 6px;'
+            f'border-radius:3px;font-size:0.72rem;font-weight:600;">'
+            f'{format_currency(spent_raw)}</span>'
+        ) if spent_raw > 0 else ""
 
-        if has_event:
-            event_pill = (
-                ' <span style="background:#E65100;color:#fff;padding:1px 6px;'
-                'border-radius:3px;font-size:0.72rem;">event</span>'
-            )
-        else:
-            event_pill = ""
+        event_pill = (
+            ' <span style="background:#E65100;color:#fff;padding:1px 6px;'
+            'border-radius:3px;font-size:0.72rem;">event</span>'
+        ) if has_event else ""
 
-        rev_indicator = " ✓" if reviewed else ""
         mon_indicator = " 📡" if monitor_cur else ""
         enr_indicator = " 🔬" if enrich_cur else ""
+        rev_indicator = " ✓"  if reviewed    else ""
         completeness_bar = _nc_completeness_bar(p["completeness"])
+
         label_html = (
             f"{cls_dot}<b>{company}</b> &nbsp;"
             f"<span style='color:#888;font-size:0.85rem;'>{domain}</span>"
@@ -1279,25 +1279,20 @@ def tab_new_contacts(sh) -> None:
             f"<span style='color:#6A1B9A;font-size:0.8rem;'>{enr_indicator}</span>"
             f"<span style='color:#2E7D32;font-size:0.8rem;'>{rev_indicator}</span>"
         )
-        # st.expander doesn't accept HTML in its label, so we render a
-        # markdown summary line above the expander as the visual signal row
         st.markdown(
             f'<div style="margin-bottom:-10px;padding:4px 2px;font-size:0.88rem;">'
             f'{label_html}</div>',
             unsafe_allow_html=True,
         )
 
-        expander_label = f"{company}  ·  {domain}"
-        with st.expander(expander_label, expanded=False):
+        with st.expander(f"{company}  ·  {domain}", expanded=False):
 
-            # Top row: segment badge + status
             badge_html  = _nc_class_badge(cls)
             status_icon = "🟢" if status == "customer" else "⚪"
             rev_badge   = (
                 '<span style="background:#4CAF50;color:#fff;padding:1px 7px;'
                 'border-radius:3px;font-size:0.75rem;margin-left:8px;">reviewed</span>'
-                if reviewed else ""
-            )
+            ) if reviewed else ""
             st.markdown(
                 f"{badge_html} &nbsp; {status_icon} &nbsp;"
                 f"<span style='font-size:0.85rem;color:#555;'>{status.title()}</span>"
@@ -1306,20 +1301,15 @@ def tab_new_contacts(sh) -> None:
             )
             st.markdown("")
 
-            # Details grid
             d1, d2, d3 = st.columns(3)
             with d1:
                 st.markdown("**Domain**")
                 st.code(domain, language=None)
-                date_label = first_seen or added_date or "—"
-                st.markdown(f"**Added:** {date_label}")
+                st.markdown(f"**Added:** {first_seen or added_date or '—'}")
             with d2:
                 st.markdown("**Best contact**")
                 if contact_n:
-                    name_display = contact_n
-                    if not contact_n_real:
-                        name_display += " *(from email)*"
-                    st.write(name_display)
+                    st.write(contact_n if contact_n_real else f"{contact_n} *(from email)*")
                 else:
                     st.write("—")
                 if contact_title:
@@ -1333,36 +1323,30 @@ def tab_new_contacts(sh) -> None:
                 else:
                     st.write("No purchases on record")
                 if tags:
-                    tag_list = ", ".join(t.strip() for t in tags.split(",") if t.strip())
-                    st.caption(f"Tags: {tag_list}")
+                    st.caption(f"Tags: {', '.join(t.strip() for t in tags.split(',') if t.strip())}")
                 if has_event:
                     st.caption("🎟 Has event tag")
 
             st.markdown("")
 
-            # Action row: toggles + mark reviewed button
             t1, t2, t3 = st.columns([1, 1, 2])
             with t1:
                 new_monitor = st.checkbox(
-                    "Monitor",
-                    value=monitor_cur,
+                    "Monitor", value=monitor_cur,
                     key=f"nc_mon_{abs_idx}_{domain}",
                     help="Add to the active signal-monitoring queue.",
                 )
             with t2:
                 new_enrich = st.checkbox(
-                    "Enrich",
-                    value=enrich_cur,
+                    "Enrich", value=enrich_cur,
                     key=f"nc_enr_{abs_idx}_{domain}",
                     help="Queue for homepage scrape + ICP classification.",
                 )
 
-            flags_changed = (new_monitor != monitor_cur) or (new_enrich != enrich_cur)
-            if flags_changed:
+            if (new_monitor != monitor_cur) or (new_enrich != enrich_cur):
                 with st.spinner("Saving flags…"):
                     _nc_write_master_flags(sh, domain, new_monitor, new_enrich)
                     _nc_write_nc_flags(sh, all_rows, domain, new_monitor, new_enrich)
-                # Update cache in-place so the change survives without a Sheet reload
                 for cached_p in st.session_state.get("nc_rows_cache", []):
                     if cached_p.get("domain") == domain:
                         cached_p["monitor"] = str(new_monitor)
@@ -1372,11 +1356,8 @@ def tab_new_contacts(sh) -> None:
 
             with t3:
                 if not reviewed:
-                    if st.button(
-                        "✅ Mark reviewed",
-                        key=f"nc_rev_{abs_idx}_{domain}",
-                        type="primary",
-                    ):
+                    if st.button("✅ Mark reviewed", key=f"nc_rev_{abs_idx}_{domain}",
+                                 type="primary"):
                         with st.spinner("Marking reviewed…"):
                             _nc_mark_reviewed(sh, [domain])
                         st.session_state["nc_cache_dirty"] = True
@@ -1384,7 +1365,7 @@ def tab_new_contacts(sh) -> None:
                 else:
                     st.caption("✓ Already reviewed")
 
-    # ── Prev / Next controls ───────────────────────────────────────────────────
+    # ── Prev / Next controls ──────────────────────────────────────────────────
     st.markdown("")
     st.markdown("---")
     nav_l, nav_mid, nav_r = st.columns([1, 3, 1])
