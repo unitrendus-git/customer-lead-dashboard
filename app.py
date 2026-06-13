@@ -660,6 +660,8 @@ def _backfill_customers(sh) -> None:
             spent_c  = _col("total_spent")
             orders_c = _col("total_orders")
 
+            st.caption(f"Debug: headers={nc_hdrs[:6]}, dom_c={dom_c}, status_c={status_c}, spent_c={spent_c}, orders_c={orders_c}")
+
             nc_updates = []
             nc_hit = 0
             for i, row_vals in enumerate(nc_vals[1:], start=2):
@@ -675,9 +677,27 @@ def _backfill_customers(sh) -> None:
                     nc_updates.append((i, orders_c, s["total_orders"]))
                 nc_hit += 1
 
+            st.caption(f"Debug: {nc_hit} rows matched, {len(nc_updates)} cell updates queued")
+
             if nc_updates:
-                _batch_update(nc_ws, nc_updates)
-        st.success(f"✅ new_contacts: updated {nc_hit:,} domains")
+                # Split into chunks of 500 to avoid payload limits
+                chunk_size = 500
+                for chunk_start in range(0, len(nc_updates), chunk_size):
+                    chunk = nc_updates[chunk_start:chunk_start + chunk_size]
+                    body = {
+                        "data": [
+                            {
+                                "range": gspread.utils.rowcol_to_a1(r, c),
+                                "values": [[_sanitize_value(v)]],
+                            }
+                            for r, c, v in chunk
+                        ],
+                        "valueInputOption": "USER_ENTERED",
+                    }
+                    nc_ws.spreadsheet.values_batch_update(body)
+                    time.sleep(0.5)
+
+        st.success(f"✅ new_contacts: updated {nc_hit:,} domains ({len(nc_updates):,} cells)")
         st.session_state["nc_cache_dirty"] = True
         st.info("→ Go to New Contacts tab and click \"Reload from Sheet\" to see updated counts.")
     except Exception as ex:
