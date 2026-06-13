@@ -77,6 +77,12 @@ PERSONAL_EMAIL_DOMAINS = {
     "sbcglobal.net", "bellsouth.net",
 }
 
+# Marketplace relay domains — proxy emails from Amazon/eBay/etc. via Shopify.
+# Buyer identity is unknown; orders should be filtered, not attributed to a company.
+MARKETPLACE_RELAY_DOMAINS = {
+    "mail.codisto.com",   # Codisto multichannel connector (Amazon/eBay relay)
+}
+
 OWN_DOMAINS = {
     "uni-trendus.com",
     "instruments.uni-trend.com",
@@ -365,6 +371,8 @@ def _parse_contact_file(df: "pd.DataFrame", existing_domains: set,
             filtered += 1; reasons["no domain"] += 1; continue
         if domain in PERSONAL_EMAIL_DOMAINS:
             filtered += 1; reasons["personal email"] += 1; continue
+        if domain in MARKETPLACE_RELAY_DOMAINS:
+            filtered += 1; reasons["marketplace relay"] += 1; continue
         if domain in OWN_DOMAINS:
             filtered += 1; reasons["own domain"] += 1; continue
         if domain in seen:
@@ -461,6 +469,9 @@ def process_shopify_orders(df: "pd.DataFrame", existing_domains: set) -> dict:
                 current_email = ""; continue
             if domain in PERSONAL_EMAIL_DOMAINS:
                 filtered += 1; reasons["personal email"] += 1
+                current_email = ""; continue
+            if domain in MARKETPLACE_RELAY_DOMAINS:
+                filtered += 1; reasons["marketplace relay"] += 1
                 current_email = ""; continue
             if domain in OWN_DOMAINS:
                 filtered += 1; reasons["own domain"] += 1
@@ -594,7 +605,7 @@ def _backfill_customers(sh) -> None:
     domain_stats: dict = {}
     for row in order_rows:
         domain = str(row.get("domain", "")).strip().lower()
-        if not domain:
+        if not domain or domain in MARKETPLACE_RELAY_DOMAINS:
             continue
         order_num = str(row.get("order_number", "")).strip()
         try:
