@@ -4,7 +4,7 @@ app.py — Customer Lead Dashboard
 UNI-T North America | Signal-driven B2B prospecting dashboard.
 
 Tab build order (deploy and verify each before starting the next):
-  1. Upload        ← this session
+  1. Upload
   2. New Contacts
   3. Watch List
   4. Signal Feed   (Phase 3)
@@ -13,7 +13,7 @@ Tab build order (deploy and verify each before starting the next):
   7. VV Review Queue (Phase 3)
 
 Do not put credentials in this file. All secrets live in Streamlit Cloud
-Settings → Secrets (TOML format). See CLD_HANDOFF_V2.md for schema.
+Settings -> Secrets (TOML format). See CLD_HANDOFF_V2.md for schema.
 """
 
 import io
@@ -55,20 +55,12 @@ from utils import (
 
 SUPPRESS_OUTREACH = {cls: not enabled for cls, enabled in OUTREACH_ENABLED.items()}
 
-# ─────────────────────────────────────────────────────────────────────────────
-# PAGE CONFIG
-# ─────────────────────────────────────────────────────────────────────────────
-
 st.set_page_config(
     page_title="UNI-T Customer Lead Dashboard",
     page_icon="📡",
     layout="wide",
     initial_sidebar_state="collapsed",
 )
-
-# ─────────────────────────────────────────────────────────────────────────────
-# CONSTANTS
-# ─────────────────────────────────────────────────────────────────────────────
 
 PERSONAL_EMAIL_DOMAINS = {
     "gmail.com", "yahoo.com", "hotmail.com", "outlook.com", "aol.com",
@@ -77,10 +69,8 @@ PERSONAL_EMAIL_DOMAINS = {
     "sbcglobal.net", "bellsouth.net",
 }
 
-# Marketplace relay domains — proxy emails from Amazon/eBay/etc. via Shopify.
-# Buyer identity is unknown; orders should be filtered, not attributed to a company.
 MARKETPLACE_RELAY_DOMAINS = {
-    "mail.codisto.com",   # Codisto multichannel connector (Amazon/eBay relay)
+    "mail.codisto.com",
 }
 
 OWN_DOMAINS = {
@@ -100,9 +90,9 @@ DEFENSE_DOMAINS = {
 
 HAM_SIGNALS = {"arrl", "qrz", "hamradio", "ham"}
 
-BATCH_SIZE  = 200   # rows per append call
-BATCH_DELAY = 1.0   # seconds between append batches
-NC_PAGE_SIZE = 50   # contacts per page in New Contacts tab
+BATCH_SIZE   = 200
+BATCH_DELAY  = 1.0
+NC_PAGE_SIZE = 50
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -110,41 +100,24 @@ NC_PAGE_SIZE = 50   # contacts per page in New Contacts tab
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _sanitize_value(v):
-    """Replace float nan/inf with '' — Sheets API rejects JSON-non-compliant floats."""
     if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
         return ""
     return v
 
-
-def _sanitize_row(row: list) -> list:
-    """Apply _sanitize_value to every element in a row list."""
+def _sanitize_row(row):
     return [_sanitize_value(v) for v in row]
 
-
-def _batch_update(ws, updates_needed: list) -> None:
-    """
-    Fire a single values_batch_update for a list of (row_1based, col_1based, value)
-    tuples. One API call regardless of how many cells — avoids 429 quota errors.
-    """
+def _batch_update(ws, updates_needed):
     body = {
         "data": [
-            {
-                "range":  gspread.utils.rowcol_to_a1(r, c),
-                "values": [[_sanitize_value(v)]],
-            }
+            {"range": gspread.utils.rowcol_to_a1(r, c), "values": [[_sanitize_value(v)]]}
             for r, c, v in updates_needed
         ],
         "valueInputOption": "USER_ENTERED",
     }
     ws.spreadsheet.values_batch_update(body)
 
-
-def _sheet_index(sh) -> tuple:
-    """
-    Read master_companies once and return (ws, col_map, domain_row_index).
-      col_map          — {header_name: 0-based column index}
-      domain_row_index — {domain_string: 0-based row index in all_vals}
-    """
+def _sheet_index(sh):
     ws       = sh.worksheet(SHEET_MASTER)
     all_vals = ws.get_all_values()
     if not all_vals:
@@ -164,7 +137,6 @@ def _sheet_index(sh) -> tuple:
 def get_sheet():
     return gsheet_open()
 
-
 def startup():
     sh = get_sheet()
     if sh:
@@ -173,36 +145,20 @@ def startup():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# FILE-TYPE DETECTION
+# FILE HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
 
-def detect_file_type(df: "pd.DataFrame") -> "str | None":
-    """
-    Identify upload type from column headers.
-      "brevo"            — Brevo CSV  (all-caps EMAIL, FIRSTNAME, LASTNAME, COMPANY)
-      "shopify_contacts" — Shopify contacts XLSX  (mixed-case Email, First Name, Last Name)
-      "shopify_orders"   — Shopify orders CSV  (Name, Financial Status, Lineitem name/price)
-      None               — unrecognised
-    """
-    cols = set(df.columns)
-    brevo_req  = {"EMAIL", "FIRSTNAME", "LASTNAME", "COMPANY"}
-    sc_req     = {"Email", "First Name", "Last Name"}
-    orders_req = {"Name", "Financial Status", "Lineitem name", "Lineitem price"}
-
-    if brevo_req.issubset(cols):
-        return "brevo"
-    if sc_req.issubset(cols) and "EMAIL" not in cols:
-        return "shopify_contacts"
-    if orders_req.issubset(cols):
-        return "shopify_orders"
+def detect_file_type(df):
+    cols      = set(df.columns)
+    brevo_req = {"EMAIL", "FIRSTNAME", "LASTNAME", "COMPANY"}
+    sc_req    = {"Email", "First Name", "Last Name"}
+    ord_req   = {"Name", "Financial Status", "Lineitem name", "Lineitem price"}
+    if brevo_req.issubset(cols):          return "brevo"
+    if sc_req.issubset(cols) and "EMAIL" not in cols: return "shopify_contacts"
+    if ord_req.issubset(cols):            return "shopify_orders"
     return None
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# FILE READER
-# ─────────────────────────────────────────────────────────────────────────────
-
-def read_uploaded_file(f) -> "pd.DataFrame | None":
+def read_uploaded_file(f):
     if not PD_OK:
         st.error("pandas not installed.")
         return None
@@ -222,28 +178,15 @@ def read_uploaded_file(f) -> "pd.DataFrame | None":
         st.warning(f"Could not read {f.name}: {ex}")
         return None
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# DOMAIN CLASSIFIER
-# ─────────────────────────────────────────────────────────────────────────────
-
-def classify_domain(domain: str) -> str:
-    """
-    Infer domain_class from domain string alone.
-    Never returns 'distributor' — that requires master list context.
-    """
+def classify_domain(domain):
     d = domain.lower().strip()
-    if d in DEFENSE_DOMAINS:
-        return "defense"
+    if d in DEFENSE_DOMAINS: return "defense"
     for tld in EDUCATION_TLDS:
-        if d.endswith(tld):
-            return "education"
+        if d.endswith(tld): return "education"
     for tld in GOVERNMENT_TLDS:
-        if d.endswith(tld):
-            return "government"
+        if d.endswith(tld): return "government"
     for hint in HAM_SIGNALS:
-        if hint in d:
-            return "ham"
+        if hint in d: return "ham"
     return "commercial"
 
 
@@ -251,15 +194,13 @@ def classify_domain(domain: str) -> str:
 # ROW BUILDERS
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _blank_master_row() -> dict:
+def _blank_master_row():
     return {h: "" for h in MASTER_HEADERS}
 
-
-def _master_row_to_list(row: dict) -> list:
+def _master_row_to_list(row):
     return [row.get(h, "") for h in MASTER_HEADERS]
 
-
-def _new_contact_row(master_row: dict) -> list:
+def _new_contact_row(master_row):
     return [
         master_row.get("domain", ""),
         master_row.get("company_name", ""),
@@ -280,43 +221,27 @@ def _new_contact_row(master_row: dict) -> list:
         "False",
     ]
 
-
-def _build_master_row(domain, company, email, name, tags, cls, source) -> dict:
-    """Build a complete new master_companies row dict from parsed contact data."""
+def _build_master_row(domain, company, email, name, tags, cls, source):
     monitor_default = DEFAULT_MONITOR.get(cls, True)
     suppress        = SUPPRESS_OUTREACH.get(cls, False)
     is_brevo        = source == "brevo"
     is_shopify      = source == "shopify"
-
     row = _blank_master_row()
     row.update({
-        "domain":             domain,
-        "company_name":       company,
-        "domain_class":       cls,
-        "customer_status":    "prospect",
-        "watch_tier":         2,
-        "score":              1,
-        "score_domain":       1,
-        "score_contact":      1,
-        "score_engagement":   1,
-        "monitor":            str(monitor_default),
-        "enrich":             "False",
-        "suppress_outreach":  str(suppress),
-        "brevo_contacts":     1 if is_brevo else 0,
-        "shopify_contacts":   1 if is_shopify else 0,
-        "total_spent":        0,
-        "total_orders":       0,
-        "best_contact_name":  name,
-        "best_contact_email": email,
-        "tags":               tags,
-        "has_event_tag":      "True" if tags else "False",
-        "in_brevo":           str(is_brevo),
-        "in_shopify":         str(is_shopify),
-        "has_purchases":      "False",
-        "first_seen":         today_str(),
-        "last_activity":      now_str(),
-        "enriched":           "False",
-        "outreach_status":    "none",
+        "domain": domain, "company_name": company, "domain_class": cls,
+        "customer_status": "prospect", "watch_tier": 2,
+        "score": 1, "score_domain": 1, "score_contact": 1, "score_engagement": 1,
+        "monitor": str(monitor_default), "enrich": "False",
+        "suppress_outreach": str(suppress),
+        "brevo_contacts": 1 if is_brevo else 0,
+        "shopify_contacts": 1 if is_shopify else 0,
+        "total_spent": 0, "total_orders": 0,
+        "best_contact_name": name, "best_contact_email": email,
+        "tags": tags, "has_event_tag": "True" if tags else "False",
+        "in_brevo": str(is_brevo), "in_shopify": str(is_shopify),
+        "has_purchases": "False", "first_seen": today_str(),
+        "last_activity": now_str(), "enriched": "False",
+        "outreach_status": "none",
     })
     if domain in MANUAL_REVIEW_DOMAINS:
         row["notes"] = MANUAL_REVIEW_DOMAINS[domain]
@@ -324,59 +249,30 @@ def _build_master_row(domain, company, email, name, tags, cls, source) -> dict:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# CONTACT FILE PARSER (shared by Brevo + Shopify contacts)
+# CONTACT FILE PARSER
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _parse_contact_file(df: "pd.DataFrame", existing_domains: set,
-                        source: str) -> dict:
-    """
-    Core contact-parsing logic shared by Brevo and Shopify contacts.
-    source: "brevo" | "shopify"
-    """
+def _parse_contact_file(df, existing_domains, source):
     from collections import Counter
-
     if source == "brevo":
-        col_email   = "EMAIL"
-        col_company = "COMPANY"
-        col_first   = "FIRSTNAME"
-        col_last    = "LASTNAME"
-        col_tags    = "TAGS"
+        col_email, col_company, col_first, col_last, col_tags = "EMAIL", "COMPANY", "FIRSTNAME", "LASTNAME", "TAGS"
     else:
-        col_email   = "Email"
-        col_company = "Company"
-        col_first   = "First Name"
-        col_last    = "Last Name"
-        col_tags    = "Tags"
+        col_email, col_company, col_first, col_last, col_tags = "Email", "Company", "First Name", "Last Name", "Tags"
 
-    new_master   = []
-    new_contacts = []
-    update_map   = {}
-    filtered     = 0
-    reasons      = Counter()
-    seen         = set()
+    new_master, new_contacts, update_map = [], [], {}
+    filtered, reasons, seen = 0, Counter(), set()
 
     for _, row in df.iterrows():
-        email = str(row.get(col_email, "")).strip().lower()
+        email   = str(row.get(col_email, "")).strip().lower()
+        company = str(row.get(col_company, "") or row.get("Address Company", "")).strip()
 
-        # Shopify: company fallback to Address Company
-        company = str(
-            row.get(col_company, "") or row.get("Address Company", "")
-        ).strip()
-
-        if not email or "@" not in email:
-            filtered += 1; reasons["no email"] += 1; continue
-
+        if not email or "@" not in email: filtered += 1; reasons["no email"] += 1; continue
         domain = extract_domain(email)
-        if not domain:
-            filtered += 1; reasons["no domain"] += 1; continue
-        if domain in PERSONAL_EMAIL_DOMAINS:
-            filtered += 1; reasons["personal email"] += 1; continue
-        if domain in MARKETPLACE_RELAY_DOMAINS:
-            filtered += 1; reasons["marketplace relay"] += 1; continue
-        if domain in OWN_DOMAINS:
-            filtered += 1; reasons["own domain"] += 1; continue
-        if domain in seen:
-            continue
+        if not domain: filtered += 1; reasons["no domain"] += 1; continue
+        if domain in PERSONAL_EMAIL_DOMAINS:     filtered += 1; reasons["personal email"] += 1; continue
+        if domain in MARKETPLACE_RELAY_DOMAINS:  filtered += 1; reasons["marketplace relay"] += 1; continue
+        if domain in OWN_DOMAINS:               filtered += 1; reasons["own domain"] += 1; continue
+        if domain in seen: continue
         seen.add(domain)
 
         first = str(row.get(col_first, "")).strip()
@@ -386,168 +282,96 @@ def _parse_contact_file(df: "pd.DataFrame", existing_domains: set,
 
         if domain in existing_domains:
             upd = {"last_activity": now_str()}
-            if source == "brevo":
-                upd["in_brevo"] = "True"
-            else:
-                upd["in_shopify"] = "True"
-            if tags:
-                upd["tags"] = tags
+            upd["in_brevo" if source == "brevo" else "in_shopify"] = "True"
+            if tags: upd["tags"] = tags
             update_map[domain] = upd
         else:
             cls        = classify_domain(domain)
-            master_row = _build_master_row(domain, company, email, name,
-                                           tags, cls, source)
+            master_row = _build_master_row(domain, company, email, name, tags, cls, source)
             new_master.append(master_row)
             new_contacts.append(_new_contact_row(master_row))
             existing_domains.add(domain)
 
-    return {
-        "new_master_rows":  new_master,
-        "new_contact_rows": new_contacts,
-        "update_map":       update_map,
-        "filtered":         filtered,
-        "filter_reasons":   reasons,
-    }
-
+    return {"new_master_rows": new_master, "new_contact_rows": new_contacts,
+            "update_map": update_map, "filtered": filtered, "filter_reasons": reasons}
 
 def process_brevo(df, existing_domains):
     return _parse_contact_file(df, existing_domains, "brevo")
-
 
 def process_shopify_contacts(df, existing_domains):
     return _parse_contact_file(df, existing_domains, "shopify")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# SHOPIFY ORDERS PROCESSOR
+# ORDERS PROCESSOR
 # ─────────────────────────────────────────────────────────────────────────────
 
-def process_shopify_orders(df: "pd.DataFrame", existing_domains: set) -> dict:
-    """
-    Parse a Shopify orders CSV.
-
-    Multi-row format: Email/Total/Status/Tags on the FIRST row of each order;
-    continuation rows have blank Email. Carry-forward state via current_* vars.
-
-    Skips amazon-tagged orders, refunded orders, personal/own domains.
-    """
+def process_shopify_orders(df, existing_domains):
     from collections import Counter
-
-    order_rows    = []
-    domain_totals = {}
-    filtered      = 0
-    reasons       = Counter()
-
-    current_email = current_order = current_date = current_company = ""
-    current_total  = 0.0
-    current_status = current_tags = ""
+    order_rows, domain_totals, filtered, reasons = [], {}, 0, Counter()
+    cur_email = cur_order = cur_date = cur_company = ""
+    cur_total = 0.0
+    cur_status = cur_tags = ""
 
     for _, row in df.iterrows():
         email_raw = str(row.get("Email", "")).strip()
-
         if email_raw and "@" in email_raw:
-            current_email   = email_raw.lower()
-            current_order   = str(row.get("Name", "")).strip()
-            current_date    = str(row.get("Created at", "") or row.get("Paid at", "")).strip()
-            current_company = str(row.get("Billing Company", "")).strip()
-            try:
-                current_total = float(str(row.get("Total", 0) or 0).replace(",", ""))
-            except ValueError:
-                current_total = 0.0
-            current_status = str(row.get("Financial Status", "")).strip().lower()
-            current_tags   = str(row.get("Tags", "")).strip()
+            cur_email   = email_raw.lower()
+            cur_order   = str(row.get("Name", "")).strip()
+            cur_date    = str(row.get("Created at", "") or row.get("Paid at", "")).strip()
+            cur_company = str(row.get("Billing Company", "")).strip()
+            try:   cur_total = float(str(row.get("Total", 0) or 0).replace(",", ""))
+            except: cur_total = 0.0
+            cur_status = str(row.get("Financial Status", "")).strip().lower()
+            cur_tags   = str(row.get("Tags", "")).strip()
 
-            if current_status == "refunded":
-                filtered += 1; reasons["refunded order"] += 1
-                current_email = ""; continue
-            if "amazon" in current_tags.lower():
-                filtered += 1; reasons["amazon order"] += 1
-                current_email = ""; continue
+            if cur_status == "refunded": filtered += 1; reasons["refunded order"] += 1; cur_email = ""; continue
+            if "amazon" in cur_tags.lower(): filtered += 1; reasons["amazon order"] += 1; cur_email = ""; continue
+            domain = extract_domain(cur_email)
+            if not domain: cur_email = ""; continue
+            if domain in PERSONAL_EMAIL_DOMAINS:    filtered += 1; reasons["personal email"] += 1; cur_email = ""; continue
+            if domain in MARKETPLACE_RELAY_DOMAINS: filtered += 1; reasons["marketplace relay"] += 1; cur_email = ""; continue
+            if domain in OWN_DOMAINS:              filtered += 1; reasons["own domain"] += 1; cur_email = ""; continue
 
-            domain = extract_domain(current_email)
-            if not domain:
-                current_email = ""; continue
-            if domain in PERSONAL_EMAIL_DOMAINS:
-                filtered += 1; reasons["personal email"] += 1
-                current_email = ""; continue
-            if domain in MARKETPLACE_RELAY_DOMAINS:
-                filtered += 1; reasons["marketplace relay"] += 1
-                current_email = ""; continue
-            if domain in OWN_DOMAINS:
-                filtered += 1; reasons["own domain"] += 1
-                current_email = ""; continue
+        if not cur_email: continue
+        domain = extract_domain(cur_email)
+        if not domain: continue
 
-        if not current_email:
-            continue
+        try:   qty   = int(float(str(row.get("Lineitem quantity", 1) or 1)))
+        except: qty  = 1
+        try:   price = float(str(row.get("Lineitem price", 0) or 0).replace(",", ""))
+        except: price = 0.0
 
-        domain = extract_domain(current_email)
-        if not domain:
-            continue
-
-        try:
-            qty = int(float(str(row.get("Lineitem quantity", 1) or 1)))
-        except ValueError:
-            qty = 1
-        try:
-            price = float(str(row.get("Lineitem price", 0) or 0).replace(",", ""))
-        except ValueError:
-            price = 0.0
-
-        order_rows.append([
-            domain,
-            current_order,
-            current_date,
-            str(row.get("Lineitem name", "")).strip(),
-            str(row.get("Lineitem sku", "")).strip(),
-            price,
-            qty,
-            current_total,
-            str(row.get("Fulfillment Status", "")).strip(),
-            current_status,
-            current_company,
-            current_email,
-        ])
+        order_rows.append([domain, cur_order, cur_date,
+            str(row.get("Lineitem name", "")).strip(), str(row.get("Lineitem sku", "")).strip(),
+            price, qty, cur_total,
+            str(row.get("Fulfillment Status", "")).strip(), cur_status, cur_company, cur_email])
 
         if domain not in domain_totals:
-            domain_totals[domain] = {
-                "total_spent": 0.0, "total_orders": 0,
-                "last_date": current_date, "email": current_email,
-                "company": current_company, "counted_orders": set(),
-            }
+            domain_totals[domain] = {"total_spent": 0.0, "total_orders": 0,
+                "last_date": cur_date, "email": cur_email, "company": cur_company, "counted_orders": set()}
         stats = domain_totals[domain]
-        if current_order not in stats["counted_orders"]:
+        if cur_order not in stats["counted_orders"]:
             stats["total_orders"] += 1
-            stats["total_spent"]  += current_total
-            stats["counted_orders"].add(current_order)
-            if current_date > stats["last_date"]:
-                stats["last_date"] = current_date
+            stats["total_spent"]  += cur_total
+            stats["counted_orders"].add(cur_order)
+            if cur_date > stats["last_date"]: stats["last_date"] = cur_date
 
-    return {
-        "order_rows":     order_rows,
-        "domain_totals":  domain_totals,
-        "filtered":       filtered,
-        "filter_reasons": reasons,
-    }
+    return {"order_rows": order_rows, "domain_totals": domain_totals,
+            "filtered": filtered, "filter_reasons": reasons}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# BATCH APPEND WRITER
+# BATCH WRITE
 # ─────────────────────────────────────────────────────────────────────────────
 
-def batch_write(sh, tab_name: str, rows: list, progress_label: str = "") -> bool:
-    """
-    Append rows in BATCH_SIZE chunks with BATCH_DELAY between chunks.
-    Sanitizes nan/inf values before each write.
-    """
-    if not rows:
-        return True
+def batch_write(sh, tab_name, rows, progress_label=""):
+    if not rows: return True
     success = True
     for start in range(0, len(rows), BATCH_SIZE):
-        batch = [_sanitize_row(r) for r in rows[start : start + BATCH_SIZE]]
-        if not sheet_append_rows(sh, tab_name, batch):
-            success = False
-        if start + BATCH_SIZE < len(rows):
-            time.sleep(BATCH_DELAY)
+        batch = [_sanitize_row(r) for r in rows[start:start + BATCH_SIZE]]
+        if not sheet_append_rows(sh, tab_name, batch): success = False
+        if start + BATCH_SIZE < len(rows): time.sleep(BATCH_DELAY)
     return success
 
 
@@ -555,190 +379,134 @@ def batch_write(sh, tab_name: str, rows: list, progress_label: str = "") -> bool
 # UPLOAD SUMMARY
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _render_upload_summary(results: list) -> None:
+def _render_upload_summary(results):
     from collections import Counter
-    total_new      = sum(r.get("new_added", 0)        for r in results)
+    total_new      = sum(r.get("new_added", 0) for r in results)
     total_updated  = sum(r.get("existing_updated", 0) for r in results)
-    total_orders   = sum(r.get("orders_written", 0)   for r in results)
-    total_filtered = sum(r.get("filtered", 0)         for r in results)
-    merged: Counter = Counter()
-    for r in results:
-        merged += r.get("filter_reasons", Counter())
+    total_orders   = sum(r.get("orders_written", 0) for r in results)
+    total_filtered = sum(r.get("filtered", 0) for r in results)
+    merged = Counter()
+    for r in results: merged += r.get("filter_reasons", Counter())
 
     st.success("Upload complete")
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("New companies",      total_new)
-    c2.metric("Existing updated",   total_updated)
-    c3.metric("Orders processed",   total_orders)
+    c1.metric("New companies", total_new)
+    c2.metric("Existing updated", total_updated)
+    c3.metric("Orders processed", total_orders)
     c4.metric("Filtered / skipped", total_filtered)
-
     if merged:
         with st.expander("Filter breakdown"):
             for reason, count in sorted(merged.items(), key=lambda x: -x[1]):
-                st.write(f"- **{reason}** — {count:,}")
+                st.write(f"- **{reason}** -- {count:,}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CUSTOMER BACKFILL
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _backfill_customers(sh, silent: bool = False) -> None:
-    """
-    Read order_history tab, aggregate spend per domain, then batch-update
-    customer_status = 'customer', total_spent, total_orders, has_purchases
-    in BOTH master_companies and new_contacts.
-    silent=True suppresses st.info/st.success output (used during auto-trigger after upload).
-    """
+def _backfill_customers(sh, silent=False):
     with st.spinner("Reading order history..."):
         order_rows = sheet_get_all(sh, SHEET_ORDERS)
-
     if not order_rows:
         st.warning("No rows found in order_history tab.")
         return
 
-    domain_stats: dict = {}
+    domain_stats = {}
     for row in order_rows:
-        domain = str(row.get("domain", "")).strip().lower()
-        if not domain or domain in MARKETPLACE_RELAY_DOMAINS:
-            continue
+        domain    = str(row.get("domain", "")).strip().lower()
+        if not domain or domain in MARKETPLACE_RELAY_DOMAINS: continue
         order_num = str(row.get("order_number", "")).strip()
-        try:
-            order_total = float(str(row.get("order_total") or 0))
-        except (ValueError, TypeError):
-            order_total = 0.0
-
+        try:   order_total = float(str(row.get("order_total") or 0))
+        except: order_total = 0.0
         if domain not in domain_stats:
             domain_stats[domain] = {"total_spent": 0.0, "order_nums": set()}
         if order_num and order_num not in domain_stats[domain]["order_nums"]:
-            domain_stats[domain]["total_spent"]  += order_total
+            domain_stats[domain]["total_spent"] += order_total
             domain_stats[domain]["order_nums"].add(order_num)
-
     for d in domain_stats:
         domain_stats[d]["total_orders"] = len(domain_stats[d]["order_nums"])
 
-    n_domains = len(domain_stats)
     if not silent:
-        st.info(f"Found {n_domains:,} domains with purchase history. Updating sheets...")
+        st.info(f"Found {len(domain_stats):,} domains with purchase history. Updating sheets...")
 
     try:
         with st.spinner("Updating master_companies..."):
             ws, col, dom_idx = _sheet_index(sh)
-            mc_updates = []
-            mc_hit = 0
+            mc_updates, mc_hit = [], 0
             for domain, stats in domain_stats.items():
-                if domain not in dom_idx:
-                    continue
-                r = dom_idx[domain]
+                if domain not in dom_idx: continue
+                r     = dom_idx[domain]
                 spent = _sanitize_value(round(stats["total_spent"], 2))
-                for field, value in [
-                    ("customer_status", "customer"),
-                    ("has_purchases",   "True"),
-                    ("total_spent",     spent),
-                    ("total_orders",    stats["total_orders"]),
-                ]:
-                    if field in col:
-                        mc_updates.append((r + 1, col[field] + 1, value))
+                for field, value in [("customer_status", "customer"), ("has_purchases", "True"),
+                                     ("total_spent", spent), ("total_orders", stats["total_orders"])]:
+                    if field in col: mc_updates.append((r + 1, col[field] + 1, value))
                 mc_hit += 1
-            if mc_updates:
-                _batch_update(ws, mc_updates)
-        if not silent:
-            st.success(f"master_companies: updated {mc_hit:,} domains")
+            if mc_updates: _batch_update(ws, mc_updates)
+        if not silent: st.success(f"master_companies: updated {mc_hit:,} domains")
     except Exception as ex:
-        if not silent:
-            st.error(f"master_companies update failed: {ex}")
+        if not silent: st.error(f"master_companies update failed: {ex}")
         return
 
     try:
         with st.spinner("Updating new_contacts..."):
             nc_ws   = sh.worksheet(SHEET_NEW_CONTACTS)
             nc_vals = nc_ws.get_all_values()
-            if not nc_vals:
-                st.warning("new_contacts tab is empty.")
-                return
+            if not nc_vals: st.warning("new_contacts tab is empty."); return
             nc_hdrs = nc_vals[0]
-
-            def _col(name):
-                return nc_hdrs.index(name) + 1 if name in nc_hdrs else None
-
+            def _col(name): return nc_hdrs.index(name) + 1 if name in nc_hdrs else None
             dom_c    = nc_hdrs.index("domain") if "domain" in nc_hdrs else 0
             status_c = _col("customer_status")
             spent_c  = _col("total_spent")
             orders_c = _col("total_orders")
 
-            nc_updates = []
-            nc_hit = 0
+            nc_updates, nc_hit = [], 0
             for i, row_vals in enumerate(nc_vals[1:], start=2):
                 d = row_vals[dom_c].strip().lower()
-                if d not in domain_stats:
-                    continue
+                if d not in domain_stats: continue
                 s = domain_stats[d]
-                if status_c:
-                    nc_updates.append((i, status_c, "customer"))
-                if spent_c:
-                    nc_updates.append((i, spent_c, round(s["total_spent"], 2)))
-                if orders_c:
-                    nc_updates.append((i, orders_c, s["total_orders"]))
+                if status_c: nc_updates.append((i, status_c, "customer"))
+                if spent_c:  nc_updates.append((i, spent_c, round(s["total_spent"], 2)))
+                if orders_c: nc_updates.append((i, orders_c, s["total_orders"]))
                 nc_hit += 1
 
             if nc_updates:
                 sheet_title = nc_ws.title
-                chunk_size = 500
-                for chunk_start in range(0, len(nc_updates), chunk_size):
-                    chunk = nc_updates[chunk_start:chunk_start + chunk_size]
-                    body = {
-                        "data": [
-                            {
-                                "range": f"'{sheet_title}'!{gspread.utils.rowcol_to_a1(r, c)}",
-                                "values": [[_sanitize_value(v)]],
-                            }
-                            for r, c, v in chunk
-                        ],
-                        "valueInputOption": "RAW",
-                    }
+                for chunk_start in range(0, len(nc_updates), 500):
+                    chunk = nc_updates[chunk_start:chunk_start + 500]
+                    body  = {"data": [{"range": f"'{sheet_title}'!{gspread.utils.rowcol_to_a1(r, c)}",
+                                       "values": [[_sanitize_value(v)]]} for r, c, v in chunk],
+                             "valueInputOption": "RAW"}
                     nc_ws.spreadsheet.values_batch_update(body)
                     time.sleep(0.5)
 
-        if not silent:
-            st.success(f"new_contacts: updated {nc_hit:,} domains ({len(nc_updates):,} cells)")
+        if not silent: st.success(f"new_contacts: updated {nc_hit:,} domains ({len(nc_updates):,} cells)")
         st.session_state["nc_cache_dirty"] = True
-        if not silent:
-            st.info('Go to New Contacts tab and click "Reload from Sheet" to see updated counts.')
+        if not silent: st.info('Go to New Contacts and click "Reload from Sheet" to see updated counts.')
     except Exception as ex:
-        if not silent:
-            st.error(f"new_contacts update failed: {ex}")
+        if not silent: st.error(f"new_contacts update failed: {ex}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# TAB 1 — UPLOAD
+# TAB 1 -- UPLOAD
 # ─────────────────────────────────────────────────────────────────────────────
 
-def tab_upload(sh) -> None:
+def tab_upload(sh):
     st.header("Upload Contact & Order Data")
-    st.caption(
-        "Accepts Brevo CSV exports, Shopify contact XLSX exports, and "
-        "Shopify order CSV exports. File type is detected automatically from "
-        "column headers — filenames don't matter."
-    )
+    st.caption("Accepts Brevo CSV exports, Shopify contact XLSX exports, and Shopify order CSV exports. "
+               "File type is detected automatically from column headers.")
 
     if not PD_OK:
         st.error("**pandas** is not installed. Add pandas and openpyxl to requirements.txt.")
         return
 
-    uploaded_files = st.file_uploader(
-        "Drop files here (CSV or XLSX)",
-        type=["csv", "xlsx"],
-        accept_multiple_files=True,
-        key="upload_files",
-    )
+    uploaded_files = st.file_uploader("Drop files here (CSV or XLSX)", type=["csv", "xlsx"],
+                                       accept_multiple_files=True, key="upload_files")
 
     if not uploaded_files:
         st.info("No files selected yet. Drag one or more files above to begin.")
-
         st.markdown("---")
         st.markdown("**Data repair tools**")
-        st.caption(
-            "Use these if customer status or spend data looks wrong after uploading orders."
-        )
+        st.caption("Use these if customer status or spend data looks wrong after uploading orders.")
         if st.button("Backfill customer status from order history", key="backfill_customers"):
             _backfill_customers(sh)
         return
@@ -757,48 +525,30 @@ def tab_upload(sh) -> None:
     for file_idx, f in enumerate(uploaded_files):
         pct_base = file_idx / len(uploaded_files)
         progress.progress(pct_base, text=f"Reading {f.name}...")
-
         df = read_uploaded_file(f)
         if df is None:
-            session_results.append({
-                "file": f.name, "new_added": 0, "existing_updated": 0,
-                "orders_written": 0, "filtered": 0, "filter_reasons": {},
-            })
+            session_results.append({"file": f.name, "new_added": 0, "existing_updated": 0,
+                                     "orders_written": 0, "filtered": 0, "filter_reasons": {}})
             continue
 
         file_type = detect_file_type(df)
         if file_type is None:
-            st.warning(
-                f"`{f.name}` — unrecognised column layout. "
-                "Expected Brevo CSV, Shopify contacts XLSX, or Shopify orders CSV. Skipping."
-            )
-            session_results.append({
-                "file": f.name, "new_added": 0, "existing_updated": 0,
-                "orders_written": 0, "filtered": 0, "filter_reasons": {},
-            })
+            st.warning(f"`{f.name}` -- unrecognised column layout. Skipping.")
+            session_results.append({"file": f.name, "new_added": 0, "existing_updated": 0,
+                                     "orders_written": 0, "filtered": 0, "filter_reasons": {}})
             continue
 
-        type_labels = {
-            "brevo": "Brevo contacts",
-            "shopify_contacts": "Shopify contacts",
-            "shopify_orders": "Shopify orders",
-        }
-        progress.progress(
-            pct_base + 0.1 / len(uploaded_files),
-            text=f"Processing {type_labels[file_type]}: {f.name}...",
-        )
+        type_labels = {"brevo": "Brevo contacts", "shopify_contacts": "Shopify contacts",
+                       "shopify_orders": "Shopify orders"}
+        progress.progress(pct_base + 0.1 / len(uploaded_files),
+                          text=f"Processing {type_labels[file_type]}: {f.name}...")
 
         if file_type in ("brevo", "shopify_contacts"):
-            result      = (process_brevo if file_type == "brevo"
-                           else process_shopify_contacts)(df, existing_domains)
-            file_result = _write_contact_results(
-                sh, result, f.name, progress, pct_base, len(uploaded_files)
-            )
+            result      = (process_brevo if file_type == "brevo" else process_shopify_contacts)(df, existing_domains)
+            file_result = _write_contact_results(sh, result, f.name, progress, pct_base, len(uploaded_files))
         else:
             result      = process_shopify_orders(df, existing_domains)
-            file_result = _write_order_results(
-                sh, result, f.name, progress, pct_base, len(uploaded_files)
-            )
+            file_result = _write_order_results(sh, result, f.name, progress, pct_base, len(uploaded_files))
             if file_result.get("orders_written", 0) > 0:
                 progress.progress(1.0, text="Syncing customer status...")
                 _backfill_customers(sh, silent=True)
@@ -809,318 +559,201 @@ def tab_upload(sh) -> None:
     _render_upload_summary(session_results)
 
 
-def _write_contact_results(sh, result: dict, filename: str,
-                            progress, pct_base: float, n_files: int) -> dict:
-    new_master   = result["new_master_rows"]
-    new_contacts = result["new_contact_rows"]
-    update_map   = result["update_map"]
-
+def _write_contact_results(sh, result, filename, progress, pct_base, n_files):
+    new_master, new_contacts, update_map = result["new_master_rows"], result["new_contact_rows"], result["update_map"]
     new_added = 0
     if new_master:
-        progress.progress(pct_base + 0.4 / n_files,
-                          text=f"Writing {len(new_master):,} new companies...")
+        progress.progress(pct_base + 0.4 / n_files, text=f"Writing {len(new_master):,} new companies...")
         if batch_write(sh, SHEET_MASTER, [_master_row_to_list(r) for r in new_master]):
             new_added = len(new_master)
-
     if new_contacts:
-        progress.progress(pct_base + 0.6 / n_files,
-                          text=f"Writing {len(new_contacts):,} new_contacts rows...")
+        progress.progress(pct_base + 0.6 / n_files, text=f"Writing {len(new_contacts):,} new_contacts rows...")
         batch_write(sh, SHEET_NEW_CONTACTS, new_contacts)
 
     existing_updated = 0
     if update_map and GSPREAD_OK:
-        progress.progress(pct_base + 0.75 / n_files,
-                          text=f"Reading master list for {len(update_map):,} updates...")
         try:
             ws, col, dom_idx = _sheet_index(sh)
             updates_needed   = []
-
             for domain, updates in update_map.items():
-                if domain not in dom_idx:
-                    continue
+                if domain not in dom_idx: continue
                 r = dom_idx[domain]
                 for field, value in updates.items():
-                    if field in col:
-                        updates_needed.append((r + 1, col[field] + 1, value))
+                    if field in col: updates_needed.append((r + 1, col[field] + 1, value))
                 existing_updated += 1
-
-            if updates_needed:
-                progress.progress(pct_base + 0.9 / n_files,
-                                  text=f"Writing {existing_updated:,} contact updates...")
-                _batch_update(ws, updates_needed)
-
+            if updates_needed: _batch_update(ws, updates_needed)
         except Exception as ex:
             st.warning(f"Contact update error: {ex}")
 
-    return {
-        "file":             filename,
-        "new_added":        new_added,
-        "existing_updated": existing_updated,
-        "orders_written":   0,
-        "filtered":         result["filtered"],
-        "filter_reasons":   result["filter_reasons"],
-    }
+    return {"file": filename, "new_added": new_added, "existing_updated": existing_updated,
+            "orders_written": 0, "filtered": result["filtered"], "filter_reasons": result["filter_reasons"]}
 
 
-def _write_order_results(sh, result: dict, filename: str,
-                          progress, pct_base: float, n_files: int) -> dict:
-    order_rows    = result["order_rows"]
-    domain_totals = result["domain_totals"]
-
+def _write_order_results(sh, result, filename, progress, pct_base, n_files):
+    order_rows, domain_totals = result["order_rows"], result["domain_totals"]
     orders_written = 0
     if order_rows:
-        progress.progress(pct_base + 0.4 / n_files,
-                          text=f"Writing {len(order_rows):,} order line items...")
-        if batch_write(sh, SHEET_ORDERS, order_rows):
-            orders_written = len(order_rows)
+        progress.progress(pct_base + 0.4 / n_files, text=f"Writing {len(order_rows):,} order line items...")
+        if batch_write(sh, SHEET_ORDERS, order_rows): orders_written = len(order_rows)
 
     if domain_totals and GSPREAD_OK:
-        progress.progress(pct_base + 0.6 / n_files,
-                          text="Reading master list for spend update...")
         try:
             ws, col, dom_idx = _sheet_index(sh)
             updates_needed   = []
-
             for domain, stats in domain_totals.items():
-                if domain not in dom_idx:
-                    continue
-                r = dom_idx[domain]
-
+                if domain not in dom_idx: continue
+                r     = dom_idx[domain]
                 spent = _sanitize_value(round(stats["total_spent"], 2))
-                for field, value in [
-                    ("total_spent",     spent),
-                    ("total_orders",    stats["total_orders"]),
-                    ("has_purchases",   "True"),
-                    ("customer_status", "customer"),
-                    ("in_shopify",      "True"),
-                    ("last_activity",   now_str()),
-                ]:
-                    if field in col:
-                        updates_needed.append((r + 1, col[field] + 1, value))
-
+                for field, value in [("total_spent", spent), ("total_orders", stats["total_orders"]),
+                                     ("has_purchases", "True"), ("customer_status", "customer"),
+                                     ("in_shopify", "True"), ("last_activity", now_str())]:
+                    if field in col: updates_needed.append((r + 1, col[field] + 1, value))
                 if stats["email"] and "best_contact_email" in col:
-                    updates_needed.append(
-                        (r + 1, col["best_contact_email"] + 1,
-                         _sanitize_value(stats["email"])))
+                    updates_needed.append((r + 1, col["best_contact_email"] + 1, _sanitize_value(stats["email"])))
                 if stats["company"] and "company_name" in col:
-                    updates_needed.append(
-                        (r + 1, col["company_name"] + 1,
-                         _sanitize_value(stats["company"])))
+                    updates_needed.append((r + 1, col["company_name"] + 1, _sanitize_value(stats["company"])))
+            if updates_needed: _batch_update(ws, updates_needed)
 
-            if updates_needed:
-                progress.progress(
-                    pct_base + 0.85 / n_files,
-                    text=f"Writing spend updates for {len(domain_totals):,} domains...")
-                _batch_update(ws, updates_needed)
-
+            # Sync new_contacts
             try:
-                nc_ws      = sh.worksheet(SHEET_NEW_CONTACTS)
-                nc_vals    = nc_ws.get_all_values()
+                nc_ws   = sh.worksheet(SHEET_NEW_CONTACTS)
+                nc_vals = nc_ws.get_all_values()
                 if nc_vals:
-                    nc_hdrs    = nc_vals[0]
-                    nc_dom_col = nc_hdrs.index("domain") if "domain" in nc_hdrs else 0
-                    nc_status_col = nc_hdrs.index("customer_status") + 1 \
-                                    if "customer_status" in nc_hdrs else None
-                    nc_spent_col  = nc_hdrs.index("total_spent") + 1 \
-                                    if "total_spent" in nc_hdrs else None
-                    nc_orders_col = nc_hdrs.index("total_orders") + 1 \
-                                    if "total_orders" in nc_hdrs else None
-                    nc_updates = []
+                    nc_hdrs       = nc_vals[0]
+                    nc_dom_col    = nc_hdrs.index("domain") if "domain" in nc_hdrs else 0
+                    nc_status_col = nc_hdrs.index("customer_status") + 1 if "customer_status" in nc_hdrs else None
+                    nc_spent_col  = nc_hdrs.index("total_spent") + 1 if "total_spent" in nc_hdrs else None
+                    nc_orders_col = nc_hdrs.index("total_orders") + 1 if "total_orders" in nc_hdrs else None
+                    nc_updates    = []
                     for i, row_vals in enumerate(nc_vals[1:], start=2):
                         d = row_vals[nc_dom_col]
                         if d in domain_totals:
                             s = domain_totals[d]
-                            if nc_status_col:
-                                nc_updates.append((i, nc_status_col, "customer"))
-                            if nc_spent_col:
-                                nc_updates.append((i, nc_spent_col,
-                                                   round(s["total_spent"], 2)))
-                            if nc_orders_col:
-                                nc_updates.append((i, nc_orders_col, s["total_orders"]))
-                    if nc_updates:
-                        _batch_update(nc_ws, nc_updates)
+                            if nc_status_col: nc_updates.append((i, nc_status_col, "customer"))
+                            if nc_spent_col:  nc_updates.append((i, nc_spent_col, round(s["total_spent"], 2)))
+                            if nc_orders_col: nc_updates.append((i, nc_orders_col, s["total_orders"]))
+                    if nc_updates: _batch_update(nc_ws, nc_updates)
             except Exception as ex:
                 st.warning(f"new_contacts customer sync error: {ex}")
-
         except Exception as ex:
             st.warning(f"Spend update error: {ex}")
 
-    return {
-        "file":             filename,
-        "new_added":        0,
-        "existing_updated": len(domain_totals),
-        "orders_written":   orders_written,
-        "filtered":         result["filtered"],
-        "filter_reasons":   result["filter_reasons"],
-    }
+    return {"file": filename, "new_added": 0, "existing_updated": len(domain_totals),
+            "orders_written": orders_written, "filtered": result["filtered"],
+            "filter_reasons": result["filter_reasons"]}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# TAB 2 — NEW CONTACTS
+# TAB 2 -- NEW CONTACTS
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _nc_class_badge(cls: str) -> str:
+def _nc_class_badge(cls):
     color = CLASS_COLOR.get(cls, "#546E7A")
     label = CLASS_LABEL.get(cls, cls.title())
-    return (
-        f'<span style="background:{color};color:#fff;padding:2px 8px;'
-        f'border-radius:4px;font-size:0.78rem;font-weight:600;'
-        f'letter-spacing:0.03em;">{label}</span>'
-    )
+    return (f'<span style="background:{color};color:#fff;padding:2px 8px;'
+            f'border-radius:4px;font-size:0.78rem;font-weight:600;letter-spacing:0.03em;">{label}</span>')
 
-
-def _nc_write_master_flags(sh, domain: str, monitor_val: bool,
-                           enrich_val: bool) -> None:
+def _nc_write_master_flags(sh, domain, monitor_val, enrich_val):
     try:
         ws, col, dom_idx = _sheet_index(sh)
-        if domain not in dom_idx:
-            return
-        r = dom_idx[domain]
+        if domain not in dom_idx: return
+        r       = dom_idx[domain]
         updates = []
-        if "monitor" in col:
-            updates.append((r + 1, col["monitor"] + 1, str(monitor_val)))
-        if "enrich" in col:
-            updates.append((r + 1, col["enrich"] + 1, str(enrich_val)))
-        if updates:
-            _batch_update(ws, updates)
+        if "monitor" in col: updates.append((r + 1, col["monitor"] + 1, str(monitor_val)))
+        if "enrich" in col:  updates.append((r + 1, col["enrich"] + 1, str(enrich_val)))
+        if updates: _batch_update(ws, updates)
     except Exception as ex:
         st.warning(f"Could not update master_companies for {domain}: {ex}")
 
-
-def _nc_write_nc_flags(sh, nc_rows_data: list, domain: str,
-                       monitor_val: bool, enrich_val: bool) -> None:
+def _nc_write_nc_flags(sh, nc_rows_data, domain, monitor_val, enrich_val):
     try:
-        ws = sh.worksheet(SHEET_NEW_CONTACTS)
-        all_vals = ws.get_all_values()
-        if not all_vals:
-            return
-        headers = all_vals[0]
-        mon_col = headers.index("monitor") + 1 if "monitor" in headers else None
-        enr_col = headers.index("enrich")  + 1 if "enrich"  in headers else None
-        dom_col = headers.index("domain")  + 1 if "domain"  in headers else 1
+        ws          = sh.worksheet(SHEET_NEW_CONTACTS)
+        all_vals    = ws.get_all_values()
+        if not all_vals: return
+        headers     = all_vals[0]
+        mon_col     = headers.index("monitor") + 1 if "monitor" in headers else None
+        enr_col     = headers.index("enrich") + 1  if "enrich" in headers  else None
+        dom_col     = headers.index("domain") + 1  if "domain" in headers  else 1
         sheet_title = ws.title
-
-        updates = []
+        updates     = []
         for i, row_vals in enumerate(all_vals[1:], start=2):
             if row_vals[dom_col - 1] == domain:
-                if mon_col:
-                    updates.append((i, mon_col, str(monitor_val)))
-                if enr_col:
-                    updates.append((i, enr_col, str(enrich_val)))
+                if mon_col: updates.append((i, mon_col, str(monitor_val)))
+                if enr_col: updates.append((i, enr_col, str(enrich_val)))
                 break
         if updates:
-            body = {
-                "data": [
-                    {
-                        "range": f"'{sheet_title}'!{gspread.utils.rowcol_to_a1(r, c)}",
-                        "values": [[_sanitize_value(v)]],
-                    }
-                    for r, c, v in updates
-                ],
-                "valueInputOption": "RAW",
-            }
+            body = {"data": [{"range": f"'{sheet_title}'!{gspread.utils.rowcol_to_a1(r, c)}",
+                               "values": [[_sanitize_value(v)]]} for r, c, v in updates],
+                    "valueInputOption": "RAW"}
             ws.spreadsheet.values_batch_update(body)
     except Exception as ex:
         st.warning(f"Could not update new_contacts flags for {domain}: {ex}")
 
-
-def _nc_mark_reviewed(sh, domains: list) -> bool:
+def _nc_mark_reviewed(sh, domains):
     try:
-        ws = sh.worksheet(SHEET_NEW_CONTACTS)
-        all_vals = ws.get_all_values()
-        if not all_vals:
-            return False
-        headers = all_vals[0]
-        rev_col = headers.index("reviewed") + 1 if "reviewed" in headers else None
-        dom_col = headers.index("domain")   + 1 if "domain"   in headers else 1
-        if not rev_col:
-            return False
+        ws          = sh.worksheet(SHEET_NEW_CONTACTS)
+        all_vals    = ws.get_all_values()
+        if not all_vals: return False
+        headers     = all_vals[0]
+        rev_col     = headers.index("reviewed") + 1 if "reviewed" in headers else None
+        dom_col     = headers.index("domain") + 1   if "domain" in headers   else 1
+        if not rev_col: return False
         sheet_title = ws.title
-
-        domain_set = set(domains)
-        updates = []
-        for i, row_vals in enumerate(all_vals[1:], start=2):
-            if row_vals[dom_col - 1] in domain_set:
-                updates.append((i, rev_col, "True"))
-
+        domain_set  = set(domains)
+        updates     = [(i, rev_col, "True") for i, row_vals in enumerate(all_vals[1:], start=2)
+                       if row_vals[dom_col - 1] in domain_set]
         if updates:
-            body = {
-                "data": [
-                    {
-                        "range": f"'{sheet_title}'!{gspread.utils.rowcol_to_a1(r, c)}",
-                        "values": [[v]],
-                    }
-                    for r, c, v in updates
-                ],
-                "valueInputOption": "RAW",
-            }
+            body = {"data": [{"range": f"'{sheet_title}'!{gspread.utils.rowcol_to_a1(r, c)}",
+                               "values": [[v]]} for r, c, v in updates],
+                    "valueInputOption": "RAW"}
             ws.spreadsheet.values_batch_update(body)
         return True
     except Exception as ex:
         st.warning(f"Mark-reviewed error: {ex}")
         return False
 
-
-def _nc_safe_str(v) -> str:
-    if v is None:
-        return ""
+def _nc_safe_str(v):
+    if v is None: return ""
     s = str(v).strip()
     tokens = s.lower().split()
-    if tokens and all(t == "nan" for t in tokens):
-        return ""
+    if tokens and all(t == "nan" for t in tokens): return ""
     return s
 
-
-def _nc_safe_bool(v, default: bool = False) -> bool:
-    if isinstance(v, bool):
-        return v
+def _nc_safe_bool(v, default=False):
+    if isinstance(v, bool): return v
     return str(v).strip().upper() == "TRUE"
 
-
-def _nc_strip_trailing_nan(s: str) -> str:
+def _nc_strip_trailing_nan(s):
     import re as _re
     s = _re.sub(r'(?i)\s*\bnan\b\s*$', '', s).strip()
     s = _re.sub(r'(?i)^\s*\bnan\b\s*', '', s).strip()
-    s = _re.sub(r'  +', ' ', s).strip()
-    return s
+    return _re.sub(r'  +', ' ', s).strip()
 
-
-def _nc_infer_name_from_email(email: str) -> str:
-    if not email or "@" not in email:
-        return ""
-    local = email.split("@")[0].lower()
+def _nc_infer_name_from_email(email):
+    if not email or "@" not in email: return ""
     import re
+    local = email.split("@")[0].lower()
     parts = [p for p in re.split(r'[._\-0-9]+', local) if len(p) > 1]
-    if not parts:
-        return ""
-    if all(len(p) <= 1 for p in parts):
-        return ""
-    name_parts = parts[:2]
-    return " ".join(p.title() for p in name_parts)
+    if not parts or all(len(p) <= 1 for p in parts): return ""
+    return " ".join(p.title() for p in parts[:2])
 
-
-def _nc_completeness(p: dict) -> int:
+def _nc_completeness(p):
     score = 0
-    if p.get("contact_n_real"):    score += 1
-    if p.get("contact_e"):         score += 1
-    if p.get("contact_title"):     score += 1
-    if p.get("company_real"):      score += 1
-    if p.get("tags"):              score += 1
+    if p.get("contact_n_real"): score += 1
+    if p.get("contact_e"):      score += 1
+    if p.get("contact_title"):  score += 1
+    if p.get("company_real"):   score += 1
+    if p.get("tags"):           score += 1
     if p.get("spent_raw", 0) > 0: score += 1
     return score
 
-
-def _nc_completeness_bar(score: int, max_score: int = 6) -> str:
+def _nc_completeness_bar(score, max_score=6):
     filled = "<span style='color:#0066CC;font-size:0.85rem;'>&#9679;</span>"
     empty  = "<span style='color:#CCC;font-size:0.85rem;'>&#9679;</span>"
     return "".join(filled if i < score else empty for i in range(max_score))
 
-
-def _nc_load(sh) -> list:
-    if (
-        "nc_rows_cache" not in st.session_state
-        or st.session_state.get("nc_cache_dirty")
-    ):
+def _nc_load(sh):
+    if "nc_rows_cache" not in st.session_state or st.session_state.get("nc_cache_dirty"):
         with st.spinner("Loading contacts from Sheet..."):
             rows = sheet_get_all(sh, SHEET_NEW_CONTACTS)
         st.session_state["nc_rows_cache"] = rows
@@ -1128,16 +761,13 @@ def _nc_load(sh) -> list:
     return st.session_state["nc_rows_cache"]
 
 
-def tab_new_contacts(sh) -> None:
+def tab_new_contacts(sh):
     st.header("New Contacts")
-    st.caption(
-        "All companies in the system — filter to unreviewed, customers, or by segment. "
-        "Set monitor and enrich flags, then mark reviewed to clear the queue."
-    )
+    st.caption("All companies in the system -- filter to unreviewed, customers, or by segment. "
+               "Set monitor and enrich flags, then mark reviewed to clear the queue.")
 
     all_rows   = _nc_load(sh)
     total_rows = len(all_rows)
-
     if not all_rows:
         st.info("No contacts loaded yet. Upload a file on the Upload tab first.")
         return
@@ -1153,43 +783,25 @@ def tab_new_contacts(sh) -> None:
         tags          = _nc_safe_str(r.get("tags"))
         contact_e     = _nc_safe_str(r.get("best_contact_email"))
         contact_title = _nc_safe_str(r.get("best_contact_title"))
-
-        contact_n_raw  = _nc_strip_trailing_nan(_nc_safe_str(r.get("best_contact_name")))
+        contact_n_raw = _nc_strip_trailing_nan(_nc_safe_str(r.get("best_contact_name")))
         contact_n_real = bool(contact_n_raw)
-        if contact_n_raw:
-            contact_n = contact_n_raw
-        else:
-            contact_n = _nc_infer_name_from_email(contact_e)
-
-        try:
-            spent_raw = float(str(r.get("total_spent") or 0))
-        except (ValueError, TypeError):
-            spent_raw = 0.0
-        try:
-            orders_raw = int(float(str(r.get("total_orders") or 0)))
-        except (ValueError, TypeError):
-            orders_raw = 0
+        contact_n     = contact_n_raw or _nc_infer_name_from_email(contact_e)
+        try:   spent_raw = float(str(r.get("total_spent") or 0))
+        except: spent_raw = 0.0
+        try:   orders_raw = int(float(str(r.get("total_orders") or 0)))
+        except: orders_raw = 0
 
         p = {
-            "domain":         domain,
-            "company":        company,
-            "company_real":   company_real,
-            "cls":            cls,
-            "status":         status,
-            "spent_raw":      spent_raw,
-            "orders_raw":     orders_raw,
-            "tags":           tags,
-            "has_event":      _nc_safe_str(r.get("has_event_tag")).strip() == "True",
-            "contact_n":      contact_n,
-            "contact_n_real": contact_n_real,
-            "contact_e":      contact_e,
-            "contact_title":  contact_title,
-            "first_seen":     _nc_safe_str(r.get("first_seen")),
-            "added_date":     _nc_safe_str(r.get("added_date")),
-            "monitor_cur":    _nc_safe_bool(r.get("monitor", "True"),  default=True),
-            "enrich_cur":     _nc_safe_bool(r.get("enrich",  "False"), default=False),
-            "reviewed":       _nc_safe_bool(r.get("reviewed"),         default=False),
-            "_raw":           r,
+            "domain": domain, "company": company, "company_real": company_real,
+            "cls": cls, "status": status, "spent_raw": spent_raw, "orders_raw": orders_raw,
+            "tags": tags, "has_event": _nc_safe_str(r.get("has_event_tag")).strip() == "True",
+            "contact_n": contact_n, "contact_n_real": contact_n_real,
+            "contact_e": contact_e, "contact_title": contact_title,
+            "first_seen": _nc_safe_str(r.get("first_seen")), "added_date": _nc_safe_str(r.get("added_date")),
+            "monitor_cur": _nc_safe_bool(r.get("monitor", "True"), default=True),
+            "enrich_cur":  _nc_safe_bool(r.get("enrich", "False"), default=False),
+            "reviewed":    _nc_safe_bool(r.get("reviewed"), default=False),
+            "_raw": r,
         }
         p["completeness"] = _nc_completeness(p)
         prepped.append(p)
@@ -1198,102 +810,51 @@ def tab_new_contacts(sh) -> None:
 
     with st.sidebar:
         st.markdown("### Filter Contacts")
-
-        show_filter = st.radio(
-            "Show",
-            ["Unreviewed only", "All contacts", "Customers", "Reviewed only"],
-            index=0,
-            key="nc_show_filter",
-        )
-
-        status_filter = st.radio(
-            "Customer status",
-            ["All", "Customers", "Prospects"],
-            index=0,
-            key="nc_status_filter",
-        )
-
-        class_filter = st.multiselect(
-            "Segment",
-            options=available_classes,
-            default=[],
-            placeholder="All segments",
-            key="nc_class_filter",
-        )
-
-        has_purchase_only = st.checkbox(
-            "Has purchases", value=False, key="nc_has_purchase"
-        )
-        has_event_only = st.checkbox(
-            "Has event tag", value=False, key="nc_has_event"
-        )
-
+        show_filter = st.radio("Show",
+            ["Unreviewed only", "All contacts", "Customers", "Reviewed only"], index=0, key="nc_show_filter")
+        status_filter = st.radio("Customer status", ["All", "Customers", "Prospects"], index=0, key="nc_status_filter")
+        class_filter = st.multiselect("Segment", options=available_classes, default=[],
+                                       placeholder="All segments", key="nc_class_filter")
+        has_purchase_only = st.checkbox("Has purchases", value=False, key="nc_has_purchase")
+        has_event_only    = st.checkbox("Has event tag", value=False, key="nc_has_event")
         st.markdown("---")
-        sort_by = st.selectbox(
-            "Sort by",
-            ["Data completeness (best first)",
-             "Date added (newest)", "Date added (oldest)",
-             "Company name (A-Z)", "Total spend (high-low)"],
-            key="nc_sort",
-        )
-
+        sort_by = st.selectbox("Sort by",
+            ["Data completeness (best first)", "Date added (newest)", "Date added (oldest)",
+             "Company name (A-Z)", "Total spend (high-low)"], key="nc_sort")
         st.markdown("---")
         if st.button("Reload from Sheet", key="nc_reload"):
             st.session_state["nc_cache_dirty"] = True
             st.rerun()
         sheet_id = get_secret("GSHEET_ID")
         if sheet_id:
-            sheet_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}"
-            st.markdown(
-                f'<a href="{sheet_url}" target="_blank" style="'
-                f'font-size:0.82rem;color:#0066CC;text-decoration:none;">'
-                f'&#128196; Edit Sheet</a>',
-                unsafe_allow_html=True,
-            )
+            st.markdown(f'<a href="https://docs.google.com/spreadsheets/d/{sheet_id}" target="_blank" '
+                        f'style="font-size:0.82rem;color:#0066CC;text-decoration:none;">&#128196; Edit Sheet</a>',
+                        unsafe_allow_html=True)
 
     view = prepped
+    if show_filter == "Unreviewed only":    view = [p for p in view if not p["reviewed"]]
+    elif show_filter == "Customers":        view = [p for p in view if p["status"] == "customer"]
+    elif show_filter == "Reviewed only":    view = [p for p in view if p["reviewed"]]
+    if status_filter == "Customers":        view = [p for p in view if p["status"] == "customer"]
+    elif status_filter == "Prospects":      view = [p for p in view if p["status"] != "customer"]
+    if class_filter:                        view = [p for p in view if p["cls"] in class_filter]
+    if has_purchase_only:                   view = [p for p in view if p["spent_raw"] > 0]
+    if has_event_only:                      view = [p for p in view if p["has_event"]]
 
-    if show_filter == "Unreviewed only":
-        view = [p for p in view if not p["reviewed"]]
-    elif show_filter == "Customers":
-        view = [p for p in view if p["status"] == "customer"]
-    elif show_filter == "Reviewed only":
-        view = [p for p in view if p["reviewed"]]
-
-    if status_filter == "Customers":
-        view = [p for p in view if p["status"] == "customer"]
-    elif status_filter == "Prospects":
-        view = [p for p in view if p["status"] != "customer"]
-
-    if class_filter:
-        view = [p for p in view if p["cls"] in class_filter]
-
-    if has_purchase_only:
-        view = [p for p in view if p["spent_raw"] > 0]
-
-    if has_event_only:
-        view = [p for p in view if p["has_event"]]
-
-    if sort_by == "Data completeness (best first)":
-        view = sorted(view, key=lambda p: -p["completeness"])
-    elif sort_by == "Date added (oldest)":
-        view = sorted(view, key=lambda p: p["added_date"] or p["first_seen"])
-    elif sort_by == "Company name (A-Z)":
-        view = sorted(view, key=lambda p: p["company"].lower())
-    elif sort_by == "Total spend (high-low)":
-        view = sorted(view, key=lambda p: -p["spent_raw"])
+    if sort_by == "Data completeness (best first)": view = sorted(view, key=lambda p: -p["completeness"])
+    elif sort_by == "Date added (oldest)":          view = sorted(view, key=lambda p: p["added_date"] or p["first_seen"])
+    elif sort_by == "Company name (A-Z)":           view = sorted(view, key=lambda p: p["company"].lower())
+    elif sort_by == "Total spend (high-low)":       view = sorted(view, key=lambda p: -p["spent_raw"])
 
     n_unreviewed = sum(1 for p in prepped if not p["reviewed"])
     n_customers  = sum(1 for p in prepped if p["status"] == "customer")
     n_with_spend = sum(1 for p in prepped if p["spent_raw"] > 0)
-
     m1, m2, m3, m4, m5 = st.columns(5)
-    m1.metric("Total in system",  f"{total_rows:,}")
-    m2.metric("Unreviewed",       f"{n_unreviewed:,}")
-    m3.metric("Customers",        f"{n_customers:,}")
-    m4.metric("With purchases",   f"{n_with_spend:,}")
-    m5.metric("Showing now",      f"{len(view):,}")
-
+    m1.metric("Total in system", f"{total_rows:,}")
+    m2.metric("Unreviewed",      f"{n_unreviewed:,}")
+    m3.metric("Customers",       f"{n_customers:,}")
+    m4.metric("With purchases",  f"{n_with_spend:,}")
+    m5.metric("Showing now",     f"{len(view):,}")
     st.markdown("---")
 
     if not view:
@@ -1302,11 +863,7 @@ def tab_new_contacts(sh) -> None:
 
     unreviewed_in_view = [p for p in view if not p["reviewed"]]
     if unreviewed_in_view:
-        if st.button(
-            f"Mark all {len(unreviewed_in_view):,} shown as reviewed",
-            key="nc_mark_all",
-            type="secondary",
-        ):
+        if st.button(f"Mark all {len(unreviewed_in_view):,} shown as reviewed", key="nc_mark_all", type="secondary"):
             domains_to_clear = [p["domain"] for p in unreviewed_in_view if p["domain"]]
             with st.spinner(f"Marking {len(domains_to_clear):,} rows reviewed..."):
                 ok = _nc_mark_reviewed(sh, domains_to_clear)
@@ -1315,10 +872,7 @@ def tab_new_contacts(sh) -> None:
                 st.session_state["nc_cache_dirty"] = True
                 st.rerun()
 
-    filter_fp = (
-        f"{show_filter}|{status_filter}|{sorted(class_filter)}"
-        f"|{has_purchase_only}|{has_event_only}|{sort_by}"
-    )
+    filter_fp = f"{show_filter}|{status_filter}|{sorted(class_filter)}|{has_purchase_only}|{has_event_only}|{sort_by}"
     if st.session_state.get("nc_filter_fp") != filter_fp:
         st.session_state["nc_filter_fp"] = filter_fp
         st.session_state["nc_page"] = 0
@@ -1330,93 +884,54 @@ def tab_new_contacts(sh) -> None:
     end_idx     = start_idx + NC_PAGE_SIZE
     page_view   = view[start_idx:end_idx]
 
-    st.markdown(
-        f"**{len(view):,} contact(s)** - sorted by {sort_by.lower()} - "
-        f"page {page + 1} of {total_pages} "
-        f"({start_idx + 1}-{min(end_idx, len(view))} of {len(view):,})"
-    )
+    st.markdown(f"**{len(view):,} contact(s)** - sorted by {sort_by.lower()} - "
+                f"page {page + 1} of {total_pages} ({start_idx + 1}-{min(end_idx, len(view))} of {len(view):,})")
     st.markdown("")
 
     legend_html = " &nbsp; ".join(
-        f'<span style="background:{CLASS_COLOR[c]};color:#fff;padding:1px 7px;'
-        f'border-radius:3px;font-size:0.73rem;">{CLASS_LABEL[c]}</span>'
-        for c in available_classes if c in CLASS_COLOR
-    )
+        f'<span style="background:{CLASS_COLOR[c]};color:#fff;padding:1px 7px;border-radius:3px;font-size:0.73rem;">{CLASS_LABEL[c]}</span>'
+        for c in available_classes if c in CLASS_COLOR)
     st.markdown(legend_html, unsafe_allow_html=True)
     st.markdown("")
 
     for idx, p in enumerate(page_view):
-        abs_idx       = start_idx + idx
-        domain        = p["domain"]
-        company       = p["company"]
-        cls           = p["cls"]
-        status        = p["status"]
-        spent_raw     = p["spent_raw"]
-        orders_raw    = p["orders_raw"]
-        tags          = p["tags"]
-        has_event     = p["has_event"]
-        contact_n     = p["contact_n"]
-        contact_n_real = p["contact_n_real"]
-        contact_e     = p["contact_e"]
-        contact_title = p["contact_title"]
-        first_seen    = p["first_seen"]
-        added_date    = p["added_date"]
-        monitor_cur   = p["monitor_cur"]
-        enrich_cur    = p["enrich_cur"]
-        reviewed      = p["reviewed"]
+        abs_idx = start_idx + idx
+        domain, company, cls, status = p["domain"], p["company"], p["cls"], p["status"]
+        spent_raw, orders_raw = p["spent_raw"], p["orders_raw"]
+        tags, has_event = p["tags"], p["has_event"]
+        contact_n, contact_n_real, contact_e, contact_title = p["contact_n"], p["contact_n_real"], p["contact_e"], p["contact_title"]
+        first_seen, added_date = p["first_seen"], p["added_date"]
+        monitor_cur, enrich_cur, reviewed = p["monitor_cur"], p["enrich_cur"], p["reviewed"]
 
-        cls_dot_color = CLASS_COLOR.get(cls, "#546E7A")
-        cls_dot = (
-            f'<span style="display:inline-block;width:10px;height:10px;'
-            f'border-radius:50%;background:{cls_dot_color};margin-right:4px;"></span>'
-        )
-        spend_pill = (
-            f' <span style="background:#1B5E20;color:#fff;padding:1px 6px;'
-            f'border-radius:3px;font-size:0.72rem;font-weight:600;">'
-            f'{format_currency(spent_raw)}</span>'
-        ) if spent_raw > 0 else ""
-
-        event_pill = (
-            ' <span style="background:#E65100;color:#fff;padding:1px 6px;'
-            'border-radius:3px;font-size:0.72rem;">event</span>'
-        ) if has_event else ""
-
+        cls_dot = (f'<span style="display:inline-block;width:10px;height:10px;border-radius:50%;'
+                   f'background:{CLASS_COLOR.get(cls, "#546E7A")};margin-right:4px;"></span>')
+        spend_pill = (f' <span style="background:#1B5E20;color:#fff;padding:1px 6px;border-radius:3px;'
+                      f'font-size:0.72rem;font-weight:600;">{format_currency(spent_raw)}</span>') if spent_raw > 0 else ""
+        event_pill = (' <span style="background:#E65100;color:#fff;padding:1px 6px;border-radius:3px;'
+                      'font-size:0.72rem;">event</span>') if has_event else ""
         mon_indicator = " 📡" if monitor_cur else ""
         enr_indicator = " 🔬" if enrich_cur else ""
         rev_indicator = " ✓"  if reviewed    else ""
         completeness_bar = _nc_completeness_bar(p["completeness"])
 
-        label_html = (
-            f"{cls_dot}<b>{company}</b> &nbsp;"
-            f"<span style='color:#888;font-size:0.85rem;'>{domain}</span>"
-            f"{spend_pill}{event_pill}"
-            f" &nbsp; {completeness_bar}"
-            f"<span style='color:#0066CC;font-size:0.8rem;'>{mon_indicator}</span>"
-            f"<span style='color:#6A1B9A;font-size:0.8rem;'>{enr_indicator}</span>"
-            f"<span style='color:#2E7D32;font-size:0.8rem;'>{rev_indicator}</span>"
-        )
-        st.markdown(
-            f'<div style="margin-bottom:-10px;padding:4px 2px;font-size:0.88rem;">'
-            f'{label_html}</div>',
-            unsafe_allow_html=True,
-        )
+        label_html = (f"{cls_dot}<b>{company}</b> &nbsp;"
+                      f"<span style='color:#888;font-size:0.85rem;'>{domain}</span>"
+                      f"{spend_pill}{event_pill} &nbsp; {completeness_bar}"
+                      f"<span style='color:#0066CC;font-size:0.8rem;'>{mon_indicator}</span>"
+                      f"<span style='color:#6A1B9A;font-size:0.8rem;'>{enr_indicator}</span>"
+                      f"<span style='color:#2E7D32;font-size:0.8rem;'>{rev_indicator}</span>")
+        st.markdown(f'<div style="margin-bottom:-10px;padding:4px 2px;font-size:0.88rem;">{label_html}</div>',
+                    unsafe_allow_html=True)
 
         with st.expander(f"{company}  .  {domain}", expanded=False):
-
             badge_html  = _nc_class_badge(cls)
             status_icon = "🟢" if status == "customer" else "⚪"
-            rev_badge   = (
-                '<span style="background:#4CAF50;color:#fff;padding:1px 7px;'
-                'border-radius:3px;font-size:0.75rem;margin-left:8px;">reviewed</span>'
-            ) if reviewed else ""
-            st.markdown(
-                f"{badge_html} &nbsp; {status_icon} &nbsp;"
-                f"<span style='font-size:0.85rem;color:#555;'>{status.title()}</span>"
-                f"{rev_badge}",
-                unsafe_allow_html=True,
-            )
+            rev_badge   = ('<span style="background:#4CAF50;color:#fff;padding:1px 7px;border-radius:3px;'
+                           'font-size:0.75rem;margin-left:8px;">reviewed</span>') if reviewed else ""
+            st.markdown(f"{badge_html} &nbsp; {status_icon} &nbsp; "
+                        f"<span style='font-size:0.85rem;color:#555;'>{status.title()}</span>{rev_badge}",
+                        unsafe_allow_html=True)
             st.markdown("")
-
             d1, d2, d3 = st.columns(3)
             with d1:
                 st.markdown("**Domain**")
@@ -1424,41 +939,22 @@ def tab_new_contacts(sh) -> None:
                 st.markdown(f"**Added:** {first_seen or added_date or '-'}")
             with d2:
                 st.markdown("**Best contact**")
-                if contact_n:
-                    st.write(contact_n if contact_n_real else f"{contact_n} *(from email)*")
-                else:
-                    st.write("-")
-                if contact_title:
-                    st.caption(contact_title)
-                if contact_e:
-                    st.caption(contact_e)
+                st.write(contact_n if contact_n_real else f"{contact_n} *(from email)*" if contact_n else "-")
+                if contact_title: st.caption(contact_title)
+                if contact_e:     st.caption(contact_e)
             with d3:
                 st.markdown("**Purchase data**")
-                if orders_raw > 0:
-                    st.write(f"{format_currency(spent_raw)} across {orders_raw} order(s)")
-                else:
-                    st.write("No purchases on record")
-                if tags:
-                    st.caption(f"Tags: {', '.join(t.strip() for t in tags.split(',') if t.strip())}")
-                if has_event:
-                    st.caption("Has event tag")
-
+                st.write(f"{format_currency(spent_raw)} across {orders_raw} order(s)" if orders_raw > 0 else "No purchases on record")
+                if tags:      st.caption(f"Tags: {', '.join(t.strip() for t in tags.split(',') if t.strip())}")
+                if has_event: st.caption("Has event tag")
             st.markdown("")
-
             t1, t2, t3 = st.columns([1, 1, 2])
             with t1:
-                new_monitor = st.checkbox(
-                    "Monitor", value=monitor_cur,
-                    key=f"nc_mon_{abs_idx}_{domain}",
-                    help="Add to the active signal-monitoring queue.",
-                )
+                new_monitor = st.checkbox("Monitor", value=monitor_cur, key=f"nc_mon_{abs_idx}_{domain}",
+                                          help="Add to the active signal-monitoring queue.")
             with t2:
-                new_enrich = st.checkbox(
-                    "Enrich", value=enrich_cur,
-                    key=f"nc_enr_{abs_idx}_{domain}",
-                    help="Queue for homepage scrape + ICP classification.",
-                )
-
+                new_enrich = st.checkbox("Enrich", value=enrich_cur, key=f"nc_enr_{abs_idx}_{domain}",
+                                          help="Queue for homepage scrape + ICP classification.")
             if (new_monitor != monitor_cur) or (new_enrich != enrich_cur):
                 with st.spinner("Saving flags..."):
                     _nc_write_master_flags(sh, domain, new_monitor, new_enrich)
@@ -1469,11 +965,9 @@ def tab_new_contacts(sh) -> None:
                         cached_p["enrich"]  = str(new_enrich)
                         break
                 st.toast(f"Flags updated for {company}.", icon="✅")
-
             with t3:
                 if not reviewed:
-                    if st.button("Mark reviewed", key=f"nc_rev_{abs_idx}_{domain}",
-                                 type="primary"):
+                    if st.button("Mark reviewed", key=f"nc_rev_{abs_idx}_{domain}", type="primary"):
                         with st.spinner("Marking reviewed..."):
                             _nc_mark_reviewed(sh, [domain])
                         st.session_state["nc_cache_dirty"] = True
@@ -1490,13 +984,10 @@ def tab_new_contacts(sh) -> None:
                 st.session_state["nc_page"] = page - 1
                 st.rerun()
     with nav_mid:
-        st.markdown(
-            f"<div style='text-align:center;color:#666;font-size:0.85rem;'>"
-            f"Page {page + 1} of {total_pages} - "
-            f"{start_idx + 1}-{min(end_idx, len(view))} of {len(view):,} contacts"
-            f"</div>",
-            unsafe_allow_html=True,
-        )
+        st.markdown(f"<div style='text-align:center;color:#666;font-size:0.85rem;'>"
+                    f"Page {page + 1} of {total_pages} - "
+                    f"{start_idx + 1}-{min(end_idx, len(view))} of {len(view):,} contacts</div>",
+                    unsafe_allow_html=True)
     with nav_r:
         if page < total_pages - 1:
             if st.button("Next", key="nc_next"):
@@ -1505,68 +996,91 @@ def tab_new_contacts(sh) -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# TAB 3 — WATCH LIST
+# TAB 3 -- WATCH LIST
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _wl_load(sh) -> list:
-    """Load master_companies and cache in session_state."""
-    if (
-        "wl_rows_cache" not in st.session_state
-        or st.session_state.get("wl_cache_dirty")
-    ):
+def _wl_render_sidebar(available_classes):
+    """
+    Render Watch List sidebar. Called inside tab_watch_list so it is scoped
+    to the Watch List tab context and does not bleed into New Contacts sidebar.
+    """
+    with st.sidebar:
+        st.markdown("### Filter Watch List")
+
+        st.multiselect("Segment", options=available_classes,
+                        default=st.session_state.get("wl_class_filter", []),
+                        placeholder="All segments", key="wl_class_filter")
+
+        tier_opts = ["All", "Tier 1", "Tier 2", "Tier 3"]
+        st.radio("Watch tier", tier_opts,
+                  index=tier_opts.index(st.session_state.get("wl_tier_filter", "All")),
+                  key="wl_tier_filter")
+
+        stat_opts = ["All", "Customers", "Prospects"]
+        st.radio("Customer status", stat_opts,
+                  index=stat_opts.index(st.session_state.get("wl_status_filter", "All")),
+                  key="wl_status_filter")
+
+        st.checkbox("Has purchases",        value=st.session_state.get("wl_has_purchase", False), key="wl_has_purchase")
+        st.checkbox("Monitor flagged",      value=st.session_state.get("wl_monitor_only", False), key="wl_monitor_only")
+        st.checkbox("Enriched only",        value=st.session_state.get("wl_enriched_only", False), key="wl_enriched_only")
+        st.checkbox("Exclude distributors", value=st.session_state.get("wl_excl_dist", True),     key="wl_excl_dist")
+
+        st.markdown("---")
+        sort_opts = ["Watch tier (1 first)", "Total spend (high-low)", "Company (A-Z)", "Last activity (newest)"]
+        cur_sort  = st.session_state.get("wl_sort", "Watch tier (1 first)")
+        st.selectbox("Sort by", sort_opts,
+                      index=sort_opts.index(cur_sort) if cur_sort in sort_opts else 0,
+                      key="wl_sort")
+
+        st.markdown("---")
+        if st.button("Reload from Sheet", key="wl_reload"):
+            st.session_state["wl_cache_dirty"] = True
+            st.rerun()
+        sheet_id = get_secret("GSHEET_ID")
+        if sheet_id:
+            st.markdown(f'<a href="https://docs.google.com/spreadsheets/d/{sheet_id}" target="_blank" '
+                        f'style="font-size:0.82rem;color:#0066CC;text-decoration:none;">&#128196; Edit Sheet</a>',
+                        unsafe_allow_html=True)
+
+
+def _wl_load(sh):
+    if "wl_rows_cache" not in st.session_state or st.session_state.get("wl_cache_dirty"):
         with st.spinner("Loading Watch List from Sheet..."):
             rows = sheet_get_all(sh, SHEET_MASTER)
         st.session_state["wl_rows_cache"] = rows
         st.session_state["wl_cache_dirty"] = False
     return st.session_state["wl_rows_cache"]
 
-
-def _wl_safe_str(v) -> str:
-    if v is None:
-        return ""
+def _wl_safe_str(v):
+    if v is None: return ""
     s = str(v).strip()
     tokens = s.lower().split()
-    if tokens and all(t == "nan" for t in tokens):
-        return ""
+    if tokens and all(t == "nan" for t in tokens): return ""
     return s
 
-
-def _wl_safe_bool(v, default: bool = False) -> bool:
-    if isinstance(v, bool):
-        return v
+def _wl_safe_bool(v, default=False):
+    if isinstance(v, bool): return v
     return str(v).strip().upper() == "TRUE"
 
+def _wl_safe_float(v):
+    try:   return float(str(v or 0))
+    except: return 0.0
 
-def _wl_safe_float(v) -> float:
-    try:
-        return float(str(v or 0))
-    except (ValueError, TypeError):
-        return 0.0
+def _wl_safe_int(v):
+    try:   return int(float(str(v or 0)))
+    except: return 0
 
+def _wl_tier_color(tier):
+    return {1: "#B71C1C", 2: "#E65100", 3: "#546E7A"}.get(tier, "#9E9E9E")
 
-def _wl_safe_int(v) -> int:
-    try:
-        return int(float(str(v or 0)))
-    except (ValueError, TypeError):
-        return 0
+def _wl_tier_badge(tier):
+    color = {1: "#B71C1C", 2: "#E65100", 3: "#546E7A"}.get(tier, "#9E9E9E")
+    label = {1: "Tier 1",  2: "Tier 2",  3: "Tier 3"}.get(tier, f"Tier {tier}")
+    return (f'<span style="background:{color};color:#fff;padding:2px 8px;'
+            f'border-radius:4px;font-size:0.78rem;font-weight:600;">{label}</span>')
 
-
-def _wl_tier_color(tier) -> str:
-    return {1: "#B71C1C", 2: "#E65100", 3: "#546E7A"}.get(tier, "#546E7A")
-
-
-def _wl_tier_badge(tier) -> str:
-    colors = {1: "#B71C1C", 2: "#E65100", 3: "#546E7A"}
-    labels = {1: "Tier 1", 2: "Tier 2", 3: "Tier 3"}
-    color  = colors.get(tier, "#546E7A")
-    label  = labels.get(tier, f"Tier {tier}")
-    return (
-        f'<span style="background:{color};color:#fff;padding:2px 8px;'
-        f'border-radius:4px;font-size:0.78rem;font-weight:600;">{label}</span>'
-    )
-
-
-def _wl_completeness(p: dict) -> int:
+def _wl_completeness(p):
     score = 0
     if p.get("contact_n"): score += 1
     if p.get("contact_e"): score += 1
@@ -1576,43 +1090,37 @@ def _wl_completeness(p: dict) -> int:
     if p.get("spent", 0) > 0: score += 1
     return score
 
-
-def _wl_completeness_bar(score: int, max_score: int = 6) -> str:
+def _wl_completeness_bar(score, max_score=6):
     filled = "<span style='color:#0066CC;font-size:0.85rem;'>&#9679;</span>"
     empty  = "<span style='color:#CCC;font-size:0.85rem;'>&#9679;</span>"
     return "".join(filled if i < score else empty for i in range(max_score))
 
 
-def tab_watch_list(sh) -> None:
+def tab_watch_list(sh):
     st.header("Watch List")
-    st.caption(
-        "All companies in the master list — filter by segment, tier, and status. "
-        "Expand any row to view the full company profile, sales history, and "
-        "set monitoring flags."
-    )
+    st.caption("All companies in the master list -- filter by segment, tier, and status. "
+               "Distributors excluded by default. Expand any row to view the full profile and sales history.")
 
     all_rows = _wl_load(sh)
     if not all_rows:
         st.info("No data loaded. Upload contacts or orders on the Upload tab first.")
         return
 
-    # Pre-compute display fields once
     prepped = []
     for r in all_rows:
         domain  = _wl_safe_str(r.get("domain"))
         company = _wl_safe_str(r.get("company_name")) or domain
         cls     = _wl_safe_str(r.get("domain_class")) or "commercial"
         status  = _wl_safe_str(r.get("customer_status")) or "prospect"
-        try:
-            tier = int(float(str(r.get("watch_tier") or 2)))
-        except (ValueError, TypeError):
-            tier = 2
+        try:   tier = int(float(str(r.get("watch_tier") or 2)))
+        except: tier = 2
+        # Clamp tier to valid range 1-3
+        tier = max(1, min(3, tier)) if tier in (1, 2, 3) else 2
 
-        spent   = _wl_safe_float(r.get("total_spent"))
-        orders  = _wl_safe_int(r.get("total_orders"))
-        monitor = _wl_safe_bool(r.get("monitor"), default=True)
-        enrich  = _wl_safe_bool(r.get("enrich"),  default=False)
-
+        spent     = _wl_safe_float(r.get("total_spent"))
+        orders    = _wl_safe_int(r.get("total_orders"))
+        monitor   = _wl_safe_bool(r.get("monitor"), default=True)
+        enrich    = _wl_safe_bool(r.get("enrich"),  default=False)
         contact_n = _wl_safe_str(r.get("best_contact_name"))
         contact_e = _wl_safe_str(r.get("best_contact_email"))
         contact_t = _wl_safe_str(r.get("best_contact_title"))
@@ -1622,128 +1130,52 @@ def tab_watch_list(sh) -> None:
         notes     = _wl_safe_str(r.get("notes"))
         last_act  = _wl_safe_str(r.get("last_activity"))
 
-        p = {
-            "domain":    domain,
-            "company":   company,
-            "cls":       cls,
-            "status":    status,
-            "tier":      tier,
-            "spent":     spent,
-            "orders":    orders,
-            "monitor":   monitor,
-            "enrich":    enrich,
-            "contact_n": contact_n,
-            "contact_e": contact_e,
-            "contact_t": contact_t,
-            "icp_label": icp_label,
-            "icp_conf":  icp_conf,
-            "enriched":  enriched,
-            "notes":     notes,
-            "last_act":  last_act,
-            "_raw":      r,
-        }
+        p = {"domain": domain, "company": company, "cls": cls, "status": status,
+             "tier": tier, "spent": spent, "orders": orders, "monitor": monitor, "enrich": enrich,
+             "contact_n": contact_n, "contact_e": contact_e, "contact_t": contact_t,
+             "icp_label": icp_label, "icp_conf": icp_conf, "enriched": enriched,
+             "notes": notes, "last_act": last_act, "_raw": r}
         p["completeness"] = _wl_completeness(p)
         prepped.append(p)
 
     available_classes = sorted({p["cls"] for p in prepped if p["cls"]})
 
-    # Sidebar filters
-    with st.sidebar:
-        st.markdown("### Filter Watch List")
+    # Render Watch List sidebar (scoped to this tab context)
+    _wl_render_sidebar(available_classes)
 
-        class_filter = st.multiselect(
-            "Segment",
-            options=available_classes,
-            default=[],
-            placeholder="All segments",
-            key="wl_class_filter",
-        )
-
-        tier_filter = st.radio(
-            "Watch tier",
-            ["All", "Tier 1", "Tier 2", "Tier 3"],
-            index=0,
-            key="wl_tier_filter",
-        )
-
-        status_filter = st.radio(
-            "Customer status",
-            ["All", "Customers", "Prospects"],
-            index=0,
-            key="wl_status_filter",
-        )
-
-        has_purchase_only = st.checkbox(
-            "Has purchases", value=False, key="wl_has_purchase"
-        )
-        monitor_only = st.checkbox(
-            "Monitor flagged", value=False, key="wl_monitor_only"
-        )
-        enriched_only = st.checkbox(
-            "Enriched only", value=False, key="wl_enriched_only"
-        )
-
-        st.markdown("---")
-        sort_by = st.selectbox(
-            "Sort by",
-            [
-                "Total spend (high-low)",
-                "Company (A-Z)",
-                "Watch tier (1 first)",
-                "Last activity (newest)",
-            ],
-            key="wl_sort",
-        )
-
-        st.markdown("---")
-        if st.button("Reload from Sheet", key="wl_reload"):
-            st.session_state["wl_cache_dirty"] = True
-            st.rerun()
-        sheet_id = get_secret("GSHEET_ID")
-        if sheet_id:
-            sheet_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}"
-            st.markdown(
-                f'<a href="{sheet_url}" target="_blank" style="'
-                f'font-size:0.82rem;color:#0066CC;text-decoration:none;">'
-                f'&#128196; Edit Sheet</a>',
-                unsafe_allow_html=True,
-            )
+    # Read sidebar values
+    class_filter      = st.session_state.get("wl_class_filter", [])
+    tier_filter       = st.session_state.get("wl_tier_filter", "All")
+    status_filter     = st.session_state.get("wl_status_filter", "All")
+    has_purchase_only = st.session_state.get("wl_has_purchase", False)
+    monitor_only      = st.session_state.get("wl_monitor_only", False)
+    enriched_only     = st.session_state.get("wl_enriched_only", False)
+    excl_dist         = st.session_state.get("wl_excl_dist", True)
+    sort_by           = st.session_state.get("wl_sort", "Watch tier (1 first)")
 
     # Apply filters
     view = prepped
-
-    if class_filter:
-        view = [p for p in view if p["cls"] in class_filter]
-
+    if excl_dist:     view = [p for p in view if p["cls"] != "distributor"]
+    if class_filter:  view = [p for p in view if p["cls"] in class_filter]
     if tier_filter != "All":
-        tier_num = int(tier_filter.split()[1])
-        view = [p for p in view if p["tier"] == tier_num]
-
-    if status_filter == "Customers":
-        view = [p for p in view if p["status"] == "customer"]
-    elif status_filter == "Prospects":
-        view = [p for p in view if p["status"] != "customer"]
-
-    if has_purchase_only:
-        view = [p for p in view if p["spent"] > 0]
-
-    if monitor_only:
-        view = [p for p in view if p["monitor"]]
-
-    if enriched_only:
-        view = [p for p in view if p["enriched"]]
+        try:
+            tier_num = int(tier_filter.split()[1])
+            view = [p for p in view if p["tier"] == tier_num]
+        except (IndexError, ValueError):
+            pass
+    if status_filter == "Customers":   view = [p for p in view if p["status"] == "customer"]
+    elif status_filter == "Prospects": view = [p for p in view if p["status"] != "customer"]
+    if has_purchase_only: view = [p for p in view if p["spent"] > 0]
+    if monitor_only:      view = [p for p in view if p["monitor"]]
+    if enriched_only:     view = [p for p in view if p["enriched"]]
 
     # Sort
-    if sort_by == "Company (A-Z)":
-        view = sorted(view, key=lambda p: p["company"].lower())
-    elif sort_by == "Watch tier (1 first)":
-        view = sorted(view, key=lambda p: (p["tier"], -p["spent"]))
-    elif sort_by == "Last activity (newest)":
-        view = sorted(view, key=lambda p: p["last_act"] or "", reverse=True)
-    else:
-        view = sorted(view, key=lambda p: -p["spent"])
+    if sort_by == "Watch tier (1 first)":    view = sorted(view, key=lambda p: (p["tier"], -p["spent"]))
+    elif sort_by == "Company (A-Z)":         view = sorted(view, key=lambda p: p["company"].lower())
+    elif sort_by == "Last activity (newest)": view = sorted(view, key=lambda p: p["last_act"] or "", reverse=True)
+    else:                                     view = sorted(view, key=lambda p: -p["spent"])
 
-    # Summary metrics
+    # Summary metrics (always over full prepped, not filtered view)
     n_tier1    = sum(1 for p in prepped if p["tier"] == 1)
     n_customer = sum(1 for p in prepped if p["status"] == "customer")
     n_purchase = sum(1 for p in prepped if p["spent"] > 0)
@@ -1762,11 +1194,28 @@ def tab_watch_list(sh) -> None:
         st.info("No companies match the current filters.")
         return
 
+    # Inline tier quick-filter buttons — always on canvas, no sidebar needed
+    t_counts = {t: sum(1 for p in view if p["tier"] == t) for t in [1, 2, 3]}
+    active_qt = st.session_state.get("wl_quick_tier")
+    qcols = st.columns(4)
+    for i, (lbl, val) in enumerate([("All tiers", None), ("Tier 1", 1), ("Tier 2", 2), ("Tier 3", 3)]):
+        cnt = len(view) if val is None else t_counts.get(val, 0)
+        with qcols[i]:
+            if st.button(f"{lbl}  {cnt:,}", key=f"wl_qt_{i}",
+                          type="primary" if active_qt == val else "secondary",
+                          use_container_width=True):
+                st.session_state["wl_quick_tier"] = val
+                st.session_state["wl_page"] = 0
+                st.rerun()
+
+    # Apply quick-tier filter on top of sidebar tier filter
+    qt = st.session_state.get("wl_quick_tier")
+    if qt is not None:
+        view = [p for p in view if p["tier"] == qt]
+
     # Pagination
-    filter_fp = (
-        f"{sorted(class_filter)}|{tier_filter}|{status_filter}"
-        f"|{has_purchase_only}|{monitor_only}|{enriched_only}|{sort_by}"
-    )
+    filter_fp = (f"{sorted(class_filter)}|{tier_filter}|{status_filter}"
+                 f"|{has_purchase_only}|{monitor_only}|{enriched_only}|{excl_dist}|{sort_by}|{qt}")
     if st.session_state.get("wl_filter_fp") != filter_fp:
         st.session_state["wl_filter_fp"] = filter_fp
         st.session_state["wl_page"] = 0
@@ -1778,150 +1227,90 @@ def tab_watch_list(sh) -> None:
     end_idx     = start_idx + NC_PAGE_SIZE
     page_view   = view[start_idx:end_idx]
 
-    st.markdown(
-        f"**{len(view):,} compan{'y' if len(view) == 1 else 'ies'}** - "
-        f"sorted by {sort_by.lower()} - "
-        f"page {page + 1} of {total_pages} "
-        f"({start_idx + 1}-{min(end_idx, len(view))} of {len(view):,})"
-    )
+    st.markdown(f"**{len(view):,} compan{'y' if len(view) == 1 else 'ies'}** - "
+                f"sorted by {sort_by.lower()} - page {page + 1} of {total_pages} "
+                f"({start_idx + 1}-{min(end_idx, len(view))} of {len(view):,})")
     st.markdown("")
 
     legend_html = " &nbsp; ".join(
-        f'<span style="background:{CLASS_COLOR[c]};color:#fff;padding:1px 7px;'
-        f'border-radius:3px;font-size:0.73rem;">{CLASS_LABEL[c]}</span>'
-        for c in available_classes if c in CLASS_COLOR
-    )
+        f'<span style="background:{CLASS_COLOR[c]};color:#fff;padding:1px 7px;border-radius:3px;font-size:0.73rem;">{CLASS_LABEL[c]}</span>'
+        for c in available_classes if c in CLASS_COLOR)
     st.markdown(legend_html, unsafe_allow_html=True)
     st.markdown("")
 
-    # Per-row expanders
     for idx, p in enumerate(page_view):
         abs_idx = start_idx + idx
-        domain  = p["domain"]
-        company = p["company"]
-        cls     = p["cls"]
-        tier    = p["tier"]
-        spent   = p["spent"]
-        orders  = p["orders"]
-        monitor = p["monitor"]
-        enrich  = p["enrich"]
+        domain, company, cls, tier = p["domain"], p["company"], p["cls"], p["tier"]
+        spent, orders, monitor, enrich = p["spent"], p["orders"], p["monitor"], p["enrich"]
 
-        cls_dot_color = CLASS_COLOR.get(cls, "#546E7A")
-        cls_dot = (
-            f'<span style="display:inline-block;width:10px;height:10px;'
-            f'border-radius:50%;background:{cls_dot_color};margin-right:4px;"></span>'
-        )
-
+        cls_dot = (f'<span style="display:inline-block;width:10px;height:10px;border-radius:50%;'
+                   f'background:{CLASS_COLOR.get(cls, "#546E7A")};margin-right:4px;"></span>')
         tier_color = _wl_tier_color(tier)
-        tier_pill = (
-            f' <span style="background:{tier_color};color:#fff;padding:1px 6px;'
-            f'border-radius:3px;font-size:0.72rem;font-weight:600;">T{tier}</span>'
-        )
-
-        spend_pill = (
-            f' <span style="background:#1B5E20;color:#fff;padding:1px 6px;'
-            f'border-radius:3px;font-size:0.72rem;font-weight:600;">'
-            f'{format_currency(spent)}</span>'
-        ) if spent > 0 else ""
-
+        tier_pill  = (f' <span style="background:{tier_color};color:#fff;padding:1px 6px;'
+                      f'border-radius:3px;font-size:0.72rem;font-weight:600;">T{tier}</span>')
+        spend_pill = (f' <span style="background:#1B5E20;color:#fff;padding:1px 6px;'
+                      f'border-radius:3px;font-size:0.72rem;font-weight:600;">{format_currency(spent)}</span>') if spent > 0 else ""
         mon_indicator    = " 📡" if monitor else ""
         completeness_bar = _wl_completeness_bar(p["completeness"])
 
-        label_html = (
-            f"{cls_dot}<b>{company}</b> &nbsp;"
-            f"<span style='color:#888;font-size:0.85rem;'>{domain}</span>"
-            f"{tier_pill}{spend_pill}"
-            f" &nbsp; {completeness_bar}"
-            f"<span style='color:#0066CC;font-size:0.8rem;'>{mon_indicator}</span>"
-        )
-        st.markdown(
-            f'<div style="margin-bottom:-10px;padding:4px 2px;font-size:0.88rem;">'
-            f'{label_html}</div>',
-            unsafe_allow_html=True,
-        )
+        label_html = (f"{cls_dot}<b>{company}</b> &nbsp;"
+                      f"<span style='color:#888;font-size:0.85rem;'>{domain}</span>"
+                      f"{tier_pill}{spend_pill} &nbsp; {completeness_bar}"
+                      f"<span style='color:#0066CC;font-size:0.8rem;'>{mon_indicator}</span>")
+        st.markdown(f'<div style="margin-bottom:-10px;padding:4px 2px;font-size:0.88rem;">{label_html}</div>',
+                    unsafe_allow_html=True)
 
         with st.expander(f"{company}  .  {domain}", expanded=False):
 
-            # Section 1 — Profile
             seg_color  = CLASS_COLOR.get(cls, "#546E7A")
             seg_label  = CLASS_LABEL.get(cls, cls.title())
-            badge_html = (
-                f'<span style="background:{seg_color};color:#fff;padding:2px 8px;'
-                f'border-radius:4px;font-size:0.78rem;font-weight:600;">{seg_label}</span>'
-            )
-            tier_badge_h = _wl_tier_badge(tier)
-            status_icon  = "🟢" if p["status"] == "customer" else "⚪"
-            st.markdown(
-                f"{badge_html} &nbsp; {tier_badge_h} &nbsp; "
-                f"{status_icon} &nbsp; "
-                f"<span style='font-size:0.85rem;color:#555;'>{p['status'].title()}</span>",
-                unsafe_allow_html=True,
-            )
+            badge_html = (f'<span style="background:{seg_color};color:#fff;padding:2px 8px;'
+                          f'border-radius:4px;font-size:0.78rem;font-weight:600;">{seg_label}</span>')
+            status_icon = "🟢" if p["status"] == "customer" else "⚪"
+            st.markdown(f"{badge_html} &nbsp; {_wl_tier_badge(tier)} &nbsp; {status_icon} &nbsp; "
+                        f"<span style='font-size:0.85rem;color:#555;'>{p['status'].title()}</span>",
+                        unsafe_allow_html=True)
             st.markdown("")
 
             d1, d2, d3 = st.columns(3)
             with d1:
                 st.markdown("**Domain**")
                 st.code(domain, language=None)
-                if p["last_act"]:
-                    st.caption(f"Last activity: {p['last_act'][:10]}")
+                if p["last_act"]: st.caption(f"Last activity: {p['last_act'][:10]}")
             with d2:
                 st.markdown("**Best contact**")
                 st.write(p["contact_n"] or "-")
-                if p["contact_t"]:
-                    st.caption(p["contact_t"])
-                if p["contact_e"]:
-                    st.caption(p["contact_e"])
+                if p["contact_t"]: st.caption(p["contact_t"])
+                if p["contact_e"]: st.caption(p["contact_e"])
             with d3:
                 st.markdown("**ICP classification**")
                 if p["icp_label"]:
-                    conf_color = {
-                        "High":   "#2E7D32",
-                        "Medium": "#E65100",
-                        "Low":    "#B71C1C",
-                    }.get(p["icp_conf"], "#555")
-                    st.markdown(
-                        f"{p['icp_label']} &nbsp; "
-                        f'<span style="color:{conf_color};font-size:0.8rem;">'
-                        f"{p['icp_conf'] or ''}</span>",
-                        unsafe_allow_html=True,
-                    )
+                    conf_color = {"High": "#2E7D32", "Medium": "#E65100", "Low": "#B71C1C"}.get(p["icp_conf"], "#555")
+                    st.markdown(f"{p['icp_label']} &nbsp; "
+                                f'<span style="color:{conf_color};font-size:0.8rem;">{p["icp_conf"] or ""}</span>',
+                                unsafe_allow_html=True)
                 else:
                     st.write("Not yet enriched")
 
             st.markdown("")
-
             t1, t2 = st.columns([1, 1])
             with t1:
-                new_monitor = st.checkbox(
-                    "Monitor", value=monitor,
-                    key=f"wl_mon_{abs_idx}_{domain}",
-                    help="Add to active signal-monitoring queue.",
-                )
+                new_monitor = st.checkbox("Monitor", value=monitor, key=f"wl_mon_{abs_idx}_{domain}",
+                                          help="Add to active signal-monitoring queue.")
             with t2:
-                new_enrich = st.checkbox(
-                    "Enrich", value=enrich,
-                    key=f"wl_enr_{abs_idx}_{domain}",
-                    help="Queue for homepage scrape + ICP classification.",
-                )
+                new_enrich = st.checkbox("Enrich", value=enrich, key=f"wl_enr_{abs_idx}_{domain}",
+                                          help="Queue for homepage scrape + ICP classification.")
 
             if (new_monitor != monitor) or (new_enrich != enrich):
                 with st.spinner("Saving flags..."):
                     try:
                         ws, col, dom_idx_map = _sheet_index(sh)
                         if domain in dom_idx_map:
-                            r_idx = dom_idx_map[domain]
+                            r_idx       = dom_idx_map[domain]
                             flag_updates = []
-                            if "monitor" in col:
-                                flag_updates.append(
-                                    (r_idx + 1, col["monitor"] + 1, str(new_monitor))
-                                )
-                            if "enrich" in col:
-                                flag_updates.append(
-                                    (r_idx + 1, col["enrich"] + 1, str(new_enrich))
-                                )
-                            if flag_updates:
-                                _batch_update(ws, flag_updates)
+                            if "monitor" in col: flag_updates.append((r_idx + 1, col["monitor"] + 1, str(new_monitor)))
+                            if "enrich" in col:  flag_updates.append((r_idx + 1, col["enrich"] + 1, str(new_enrich)))
+                            if flag_updates: _batch_update(ws, flag_updates)
                     except Exception as ex:
                         st.warning(f"Could not save flags: {ex}")
                 for cached_p in st.session_state.get("wl_rows_cache", []):
@@ -1932,14 +1321,8 @@ def tab_watch_list(sh) -> None:
                 st.toast(f"Flags updated for {company}.", icon="✅")
 
             st.markdown("")
-            new_notes = st.text_area(
-                "Notes",
-                value=p["notes"],
-                key=f"wl_notes_{abs_idx}_{domain}",
-                height=72,
-                label_visibility="visible",
-                placeholder="Add notes about this company...",
-            )
+            new_notes = st.text_area("Notes", value=p["notes"], key=f"wl_notes_{abs_idx}_{domain}",
+                                      height=72, placeholder="Add notes about this company...")
             if st.button("Save notes", key=f"wl_save_notes_{abs_idx}_{domain}"):
                 with st.spinner("Saving..."):
                     try:
@@ -1955,7 +1338,7 @@ def tab_watch_list(sh) -> None:
                     except Exception as ex:
                         st.warning(f"Could not save notes: {ex}")
 
-            # Section 2 — Sales History
+            # Sales History
             st.markdown("---")
             st.markdown("**Sales History**")
             if orders > 0:
@@ -1963,40 +1346,28 @@ def tab_watch_list(sh) -> None:
                 c1.metric("Total spent",  format_currency(spent))
                 c2.metric("Total orders", orders)
                 with st.spinner("Loading order details..."):
-                    order_data = [
-                        row for row in sheet_get_all(sh, SHEET_ORDERS)
-                        if _wl_safe_str(row.get("domain")) == domain
-                    ]
+                    order_data = [row for row in sheet_get_all(sh, SHEET_ORDERS)
+                                  if _wl_safe_str(row.get("domain")) == domain]
                 if order_data:
                     for o in order_data[:20]:
                         o_date    = _wl_safe_str(o.get("order_date"))[:10]
                         o_product = _wl_safe_str(o.get("product_name")) or "-"
                         o_price   = _wl_safe_float(o.get("line_item_price"))
                         o_qty     = _wl_safe_int(o.get("quantity"))
-                        st.markdown(
-                            f"<span style='color:#888;font-size:0.8rem;'>{o_date}</span>"
-                            f" &nbsp; {o_product} &nbsp; "
-                            f"<span style='color:#2E7D32;font-size:0.8rem;'>"
-                            f"x{o_qty} &nbsp; {format_currency(o_price)}</span>",
-                            unsafe_allow_html=True,
-                        )
+                        st.markdown(f"<span style='color:#888;font-size:0.8rem;'>{o_date}</span> &nbsp; "
+                                    f"{o_product} &nbsp; "
+                                    f"<span style='color:#2E7D32;font-size:0.8rem;'>x{o_qty} &nbsp; {format_currency(o_price)}</span>",
+                                    unsafe_allow_html=True)
                     if len(order_data) > 20:
-                        st.caption(
-                            f"... and {len(order_data) - 20} more line items. "
-                            f"Open Sheet for full history."
-                        )
+                        st.caption(f"... and {len(order_data) - 20} more line items. Open Sheet for full history.")
             else:
                 st.caption("No purchases on record.")
 
-            # Section 3 — Signals (Phase 3 placeholder)
             st.markdown("---")
             st.caption("Signal monitoring coming in Phase 3.")
-
-            # Section 4 — Outreach (Phase 3 placeholder)
             st.markdown("---")
             st.caption("Outreach generator coming in Phase 3.")
 
-    # Prev / Next
     st.markdown("")
     st.markdown("---")
     nav_l, nav_mid, nav_r = st.columns([1, 3, 1])
@@ -2006,13 +1377,10 @@ def tab_watch_list(sh) -> None:
                 st.session_state["wl_page"] = page - 1
                 st.rerun()
     with nav_mid:
-        st.markdown(
-            f"<div style='text-align:center;color:#666;font-size:0.85rem;'>"
-            f"Page {page + 1} of {total_pages} - "
-            f"{start_idx + 1}-{min(end_idx, len(view))} of {len(view):,} companies"
-            f"</div>",
-            unsafe_allow_html=True,
-        )
+        st.markdown(f"<div style='text-align:center;color:#666;font-size:0.85rem;'>"
+                    f"Page {page + 1} of {total_pages} - "
+                    f"{start_idx + 1}-{min(end_idx, len(view))} of {len(view):,} companies</div>",
+                    unsafe_allow_html=True)
     with nav_r:
         if page < total_pages - 1:
             if st.button("Next", key="wl_next"):
@@ -2020,29 +1388,23 @@ def tab_watch_list(sh) -> None:
                 st.rerun()
 
 
-def tab_ham(sh) -> None:
+def tab_ham(sh):
     st.header("HAM Radio")
-    st.info("Coming soon — HAM segment signal feed and outreach queue.")
+    st.info("Coming soon -- HAM segment signal feed and outreach queue.")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # MAIN
 # ─────────────────────────────────────────────────────────────────────────────
 
-def main() -> None:
+def main():
     st.markdown(
         """
-        <div style="
-            background: #0066CC;
-            padding: 14px 24px 10px 24px;
-            border-radius: 6px;
-            margin-bottom: 20px;
-        ">
-            <span style="color:#FFFFFF; font-size:1.5rem; font-weight:700;
-                         letter-spacing:0.02em;">
+        <div style="background:#0066CC;padding:14px 24px 10px 24px;border-radius:6px;margin-bottom:20px;">
+            <span style="color:#FFFFFF;font-size:1.5rem;font-weight:700;letter-spacing:0.02em;">
                 UNI-T Customer Lead Dashboard
             </span>
-            <span style="color:#B3D1F5; font-size:0.9rem; margin-left:16px;">
+            <span style="color:#B3D1F5;font-size:0.9rem;margin-left:16px;">
                 Signal-driven B2B prospecting - North America
             </span>
         </div>
@@ -2052,15 +1414,12 @@ def main() -> None:
 
     sh = startup()
     if sh is None:
-        st.error(
-            "**Google Sheets connection failed.** "
-            "Check that GOOGLE_SERVICE_ACCOUNT and GSHEET_ID are set in "
-            "Streamlit Cloud - Settings - Secrets."
-        )
+        st.error("**Google Sheets connection failed.** "
+                 "Check that GOOGLE_SERVICE_ACCOUNT and GSHEET_ID are set in "
+                 "Streamlit Cloud - Settings - Secrets.")
         st.stop()
 
     tabs = st.tabs(["Upload", "New Contacts", "Watch List", "HAM"])
-
     with tabs[0]: tab_upload(sh)
     with tabs[1]: tab_new_contacts(sh)
     with tabs[2]: tab_watch_list(sh)
