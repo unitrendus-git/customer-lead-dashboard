@@ -565,7 +565,7 @@ def _render_upload_summary(results: list) -> None:
     for r in results:
         merged += r.get("filter_reasons", Counter())
 
-    st.success("✅ Upload complete")
+    st.success("Upload complete")
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("New companies",      total_new)
     c2.metric("Existing updated",   total_updated)
@@ -575,7 +575,7 @@ def _render_upload_summary(results: list) -> None:
     if merged:
         with st.expander("Filter breakdown"):
             for reason, count in sorted(merged.items(), key=lambda x: -x[1]):
-                st.write(f"• **{reason}** — {count:,}")
+                st.write(f"- **{reason}** — {count:,}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -589,17 +589,13 @@ def _backfill_customers(sh, silent: bool = False) -> None:
     in BOTH master_companies and new_contacts.
     silent=True suppresses st.info/st.success output (used during auto-trigger after upload).
     """
-    with st.spinner("Reading order history…"):
+    with st.spinner("Reading order history..."):
         order_rows = sheet_get_all(sh, SHEET_ORDERS)
 
     if not order_rows:
         st.warning("No rows found in order_history tab.")
         return
 
-    # Aggregate spend per domain from order_history
-    # ORDER_HEADERS: domain, order_number, order_date, product_name, sku,
-    #                line_item_price, quantity, order_total, fulfillment_status,
-    #                financial_status, billing_company, billing_email
     domain_stats: dict = {}
     for row in order_rows:
         domain = str(row.get("domain", "")).strip().lower()
@@ -617,17 +613,15 @@ def _backfill_customers(sh, silent: bool = False) -> None:
             domain_stats[domain]["total_spent"]  += order_total
             domain_stats[domain]["order_nums"].add(order_num)
 
-    # Finalize order counts
     for d in domain_stats:
         domain_stats[d]["total_orders"] = len(domain_stats[d]["order_nums"])
 
     n_domains = len(domain_stats)
     if not silent:
-        st.info(f"Found {n_domains:,} domains with purchase history. Updating sheets…")
+        st.info(f"Found {n_domains:,} domains with purchase history. Updating sheets...")
 
-    # ── Update master_companies ──────────────────────────────────────────
     try:
-        with st.spinner("Updating master_companies…"):
+        with st.spinner("Updating master_companies..."):
             ws, col, dom_idx = _sheet_index(sh)
             mc_updates = []
             mc_hit = 0
@@ -648,15 +642,14 @@ def _backfill_customers(sh, silent: bool = False) -> None:
             if mc_updates:
                 _batch_update(ws, mc_updates)
         if not silent:
-            st.success(f"✅ master_companies: updated {mc_hit:,} domains")
+            st.success(f"master_companies: updated {mc_hit:,} domains")
     except Exception as ex:
         if not silent:
             st.error(f"master_companies update failed: {ex}")
         return
 
-    # ── Update new_contacts ─────────────────────────────────────────────
     try:
-        with st.spinner("Updating new_contacts…"):
+        with st.spinner("Updating new_contacts..."):
             nc_ws   = sh.worksheet(SHEET_NEW_CONTACTS)
             nc_vals = nc_ws.get_all_values()
             if not nc_vals:
@@ -688,8 +681,6 @@ def _backfill_customers(sh, silent: bool = False) -> None:
                 nc_hit += 1
 
             if nc_updates:
-                # Use sheet-name-prefixed ranges to guarantee writes land on new_contacts
-                # not the default/first tab (which is master_companies)
                 sheet_title = nc_ws.title
                 chunk_size = 500
                 for chunk_start in range(0, len(nc_updates), chunk_size):
@@ -708,10 +699,10 @@ def _backfill_customers(sh, silent: bool = False) -> None:
                     time.sleep(0.5)
 
         if not silent:
-            st.success(f"✅ new_contacts: updated {nc_hit:,} domains ({len(nc_updates):,} cells)")
+            st.success(f"new_contacts: updated {nc_hit:,} domains ({len(nc_updates):,} cells)")
         st.session_state["nc_cache_dirty"] = True
         if not silent:
-            st.info("→ Go to New Contacts tab and click \"Reload from Sheet\" to see updated counts.")
+            st.info('Go to New Contacts tab and click "Reload from Sheet" to see updated counts.')
     except Exception as ex:
         if not silent:
             st.error(f"new_contacts update failed: {ex}")
@@ -743,30 +734,29 @@ def tab_upload(sh) -> None:
     if not uploaded_files:
         st.info("No files selected yet. Drag one or more files above to begin.")
 
-        # ── Backfill button (shown when no file is queued) ──────────────────────
         st.markdown("---")
-        st.markdown("**🔧 Data repair tools**")
+        st.markdown("**Data repair tools**")
         st.caption(
             "Use these if customer status or spend data looks wrong after uploading orders."
         )
-        if st.button("🔄 Backfill customer status from order history", key="backfill_customers"):
+        if st.button("Backfill customer status from order history", key="backfill_customers"):
             _backfill_customers(sh)
         return
 
     st.write(f"**{len(uploaded_files)} file(s) ready to process:**")
     for f in uploaded_files:
-        st.write(f"  • `{f.name}` ({f.size:,} bytes)")
+        st.write(f"  - `{f.name}` ({f.size:,} bytes)")
 
-    if not st.button("🚀 Process uploads", type="primary"):
+    if not st.button("Process uploads", type="primary"):
         return
 
     existing_domains = sheet_get_domains(sh)
     session_results  = []
-    progress         = st.progress(0.0, text="Starting…")
+    progress         = st.progress(0.0, text="Starting...")
 
     for file_idx, f in enumerate(uploaded_files):
         pct_base = file_idx / len(uploaded_files)
-        progress.progress(pct_base, text=f"Reading {f.name}…")
+        progress.progress(pct_base, text=f"Reading {f.name}...")
 
         df = read_uploaded_file(f)
         if df is None:
@@ -779,7 +769,7 @@ def tab_upload(sh) -> None:
         file_type = detect_file_type(df)
         if file_type is None:
             st.warning(
-                f"⚠️ `{f.name}` — unrecognised column layout. "
+                f"`{f.name}` — unrecognised column layout. "
                 "Expected Brevo CSV, Shopify contacts XLSX, or Shopify orders CSV. Skipping."
             )
             session_results.append({
@@ -795,7 +785,7 @@ def tab_upload(sh) -> None:
         }
         progress.progress(
             pct_base + 0.1 / len(uploaded_files),
-            text=f"Processing {type_labels[file_type]}: {f.name}…",
+            text=f"Processing {type_labels[file_type]}: {f.name}...",
         )
 
         if file_type in ("brevo", "shopify_contacts"):
@@ -809,9 +799,8 @@ def tab_upload(sh) -> None:
             file_result = _write_order_results(
                 sh, result, f.name, progress, pct_base, len(uploaded_files)
             )
-            # Auto-backfill after every orders upload to sync customer_status
             if file_result.get("orders_written", 0) > 0:
-                progress.progress(1.0, text="Syncing customer status…")
+                progress.progress(1.0, text="Syncing customer status...")
                 _backfill_customers(sh, silent=True)
 
         session_results.append(file_result)
@@ -822,10 +811,6 @@ def tab_upload(sh) -> None:
 
 def _write_contact_results(sh, result: dict, filename: str,
                             progress, pct_base: float, n_files: int) -> dict:
-    """
-    Write new master + new_contacts rows, then update existing domains.
-    All existing-domain updates fire as a single values_batch_update call.
-    """
     new_master   = result["new_master_rows"]
     new_contacts = result["new_contact_rows"]
     update_map   = result["update_map"]
@@ -833,19 +818,19 @@ def _write_contact_results(sh, result: dict, filename: str,
     new_added = 0
     if new_master:
         progress.progress(pct_base + 0.4 / n_files,
-                          text=f"Writing {len(new_master):,} new companies…")
+                          text=f"Writing {len(new_master):,} new companies...")
         if batch_write(sh, SHEET_MASTER, [_master_row_to_list(r) for r in new_master]):
             new_added = len(new_master)
 
     if new_contacts:
         progress.progress(pct_base + 0.6 / n_files,
-                          text=f"Writing {len(new_contacts):,} new_contacts rows…")
+                          text=f"Writing {len(new_contacts):,} new_contacts rows...")
         batch_write(sh, SHEET_NEW_CONTACTS, new_contacts)
 
     existing_updated = 0
     if update_map and GSPREAD_OK:
         progress.progress(pct_base + 0.75 / n_files,
-                          text=f"Reading master list for {len(update_map):,} updates…")
+                          text=f"Reading master list for {len(update_map):,} updates...")
         try:
             ws, col, dom_idx = _sheet_index(sh)
             updates_needed   = []
@@ -861,7 +846,7 @@ def _write_contact_results(sh, result: dict, filename: str,
 
             if updates_needed:
                 progress.progress(pct_base + 0.9 / n_files,
-                                  text=f"Writing {existing_updated:,} contact updates…")
+                                  text=f"Writing {existing_updated:,} contact updates...")
                 _batch_update(ws, updates_needed)
 
         except Exception as ex:
@@ -879,24 +864,19 @@ def _write_contact_results(sh, result: dict, filename: str,
 
 def _write_order_results(sh, result: dict, filename: str,
                           progress, pct_base: float, n_files: int) -> dict:
-    """
-    Write order_history rows, then update master_companies spend data.
-    All spend updates fire as a single values_batch_update call.
-    _sanitize_value() is applied to every cell value before the API call.
-    """
     order_rows    = result["order_rows"]
     domain_totals = result["domain_totals"]
 
     orders_written = 0
     if order_rows:
         progress.progress(pct_base + 0.4 / n_files,
-                          text=f"Writing {len(order_rows):,} order line items…")
+                          text=f"Writing {len(order_rows):,} order line items...")
         if batch_write(sh, SHEET_ORDERS, order_rows):
             orders_written = len(order_rows)
 
     if domain_totals and GSPREAD_OK:
         progress.progress(pct_base + 0.6 / n_files,
-                          text="Reading master list for spend update…")
+                          text="Reading master list for spend update...")
         try:
             ws, col, dom_idx = _sheet_index(sh)
             updates_needed   = []
@@ -930,11 +910,9 @@ def _write_order_results(sh, result: dict, filename: str,
             if updates_needed:
                 progress.progress(
                     pct_base + 0.85 / n_files,
-                    text=f"Writing spend updates for {len(domain_totals):,} domains…")
+                    text=f"Writing spend updates for {len(domain_totals):,} domains...")
                 _batch_update(ws, updates_needed)
 
-            # ── Also promote customer_status + has_purchases in new_contacts ──
-            # new_contacts mirrors key fields from master; update them in sync.
             try:
                 nc_ws      = sh.worksheet(SHEET_NEW_CONTACTS)
                 nc_vals    = nc_ws.get_all_values()
@@ -978,15 +956,10 @@ def _write_order_results(sh, result: dict, filename: str,
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# PLACEHOLDER TABS
-# ─────────────────────────────────────────────────────────────────────────────
-
-# ─────────────────────────────────────────────────────────────────────────────
 # TAB 2 — NEW CONTACTS
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _nc_class_badge(cls: str) -> str:
-    """Render an inline HTML color badge for a domain_class value."""
     color = CLASS_COLOR.get(cls, "#546E7A")
     label = CLASS_LABEL.get(cls, cls.title())
     return (
@@ -998,10 +971,6 @@ def _nc_class_badge(cls: str) -> str:
 
 def _nc_write_master_flags(sh, domain: str, monitor_val: bool,
                            enrich_val: bool) -> None:
-    """
-    Write monitor + enrich flags for one domain to master_companies.
-    Single _batch_update call — no loop, no 429 risk.
-    """
     try:
         ws, col, dom_idx = _sheet_index(sh)
         if domain not in dom_idx:
@@ -1020,10 +989,6 @@ def _nc_write_master_flags(sh, domain: str, monitor_val: bool,
 
 def _nc_write_nc_flags(sh, nc_rows_data: list, domain: str,
                        monitor_val: bool, enrich_val: bool) -> None:
-    """
-    Write monitor + enrich flags back to new_contacts tab for one domain.
-    Uses sheet-name-prefixed ranges to guarantee writes land on new_contacts.
-    """
     try:
         ws = sh.worksheet(SHEET_NEW_CONTACTS)
         all_vals = ws.get_all_values()
@@ -1060,10 +1025,6 @@ def _nc_write_nc_flags(sh, nc_rows_data: list, domain: str,
 
 
 def _nc_mark_reviewed(sh, domains: list) -> bool:
-    """
-    Set reviewed = True for all given domains in new_contacts.
-    Uses sheet-name-prefixed ranges to guarantee writes land on new_contacts.
-    """
     try:
         ws = sh.worksheet(SHEET_NEW_CONTACTS)
         all_vals = ws.get_all_values()
@@ -1101,11 +1062,9 @@ def _nc_mark_reviewed(sh, domains: list) -> bool:
 
 
 def _nc_safe_str(v) -> str:
-    """Return string form of v, collapsing None/nan/float-nan to empty string."""
     if v is None:
         return ""
     s = str(v).strip()
-    # Reject bare 'nan', 'nan nan', 'nan nan nan', etc.
     tokens = s.lower().split()
     if tokens and all(t == "nan" for t in tokens):
         return ""
@@ -1113,18 +1072,12 @@ def _nc_safe_str(v) -> str:
 
 
 def _nc_safe_bool(v, default: bool = False) -> bool:
-    """
-    Parse a Sheet boolean string case-insensitively.
-    Sheets auto-uppercases USER_ENTERED booleans: 'TRUE'/'FALSE'.
-    We also write 'True'/'False' from Python. Handle both.
-    """
     if isinstance(v, bool):
         return v
     return str(v).strip().upper() == "TRUE"
 
 
 def _nc_strip_trailing_nan(s: str) -> str:
-    """Strip leading/trailing nan tokens from a name. 'Maxwell nan' -> 'Maxwell'."""
     import re as _re
     s = _re.sub(r'(?i)\s*\bnan\b\s*$', '', s).strip()
     s = _re.sub(r'(?i)^\s*\bnan\b\s*', '', s).strip()
@@ -1133,35 +1086,20 @@ def _nc_strip_trailing_nan(s: str) -> str:
 
 
 def _nc_infer_name_from_email(email: str) -> str:
-    """
-    Extract a best-guess display name from an email local-part.
-    jimmylee        -> "Jimmylee"  (single token, title-case)
-    jimmy.lee       -> "Jimmy Lee" (dot-separated)
-    jimmy_lee       -> "Jimmy Lee" (underscore-separated)
-    j.lee / jlee   -> ""           (too short to be useful — suppress)
-    jimmy.lee.phd  -> "Jimmy Lee"  (take first two tokens only)
-    """
     if not email or "@" not in email:
         return ""
     local = email.split("@")[0].lower()
-    # Split on dots, underscores, hyphens, digits
     import re
     parts = [p for p in re.split(r'[._\-0-9]+', local) if len(p) > 1]
     if not parts:
         return ""
-    # Suppress if looks like initials only (all single char after split)
     if all(len(p) <= 1 for p in parts):
         return ""
-    # Take at most first two meaningful tokens as first/last name
     name_parts = parts[:2]
     return " ".join(p.title() for p in name_parts)
 
 
 def _nc_completeness(p: dict) -> int:
-    """
-    Score a prepped contact row 0-6 based on data richness.
-    Used for ranking: higher = more actionable.
-    """
     score = 0
     if p.get("contact_n_real"):    score += 1
     if p.get("contact_e"):         score += 1
@@ -1173,22 +1111,17 @@ def _nc_completeness(p: dict) -> int:
 
 
 def _nc_completeness_bar(score: int, max_score: int = 6) -> str:
-    """Return an HTML filled/empty dot bar representing completeness."""
     filled = "<span style='color:#0066CC;font-size:0.85rem;'>&#9679;</span>"
     empty  = "<span style='color:#CCC;font-size:0.85rem;'>&#9679;</span>"
     return "".join(filled if i < score else empty for i in range(max_score))
 
 
 def _nc_load(sh) -> list:
-    """
-    Load new_contacts from Sheet and cache in session_state.
-    Refresh forced by setting st.session_state['nc_cache_dirty'] = True before rerun.
-    """
     if (
         "nc_rows_cache" not in st.session_state
         or st.session_state.get("nc_cache_dirty")
     ):
-        with st.spinner("Loading contacts from Sheet…"):
+        with st.spinner("Loading contacts from Sheet..."):
             rows = sheet_get_all(sh, SHEET_NEW_CONTACTS)
         st.session_state["nc_rows_cache"] = rows
         st.session_state["nc_cache_dirty"] = False
@@ -1202,7 +1135,6 @@ def tab_new_contacts(sh) -> None:
         "Set monitor and enrich flags, then mark reviewed to clear the queue."
     )
 
-    # ── Load (cached in session_state — filter changes don't re-hit the Sheet) ──
     all_rows   = _nc_load(sh)
     total_rows = len(all_rows)
 
@@ -1210,7 +1142,6 @@ def tab_new_contacts(sh) -> None:
         st.info("No contacts loaded yet. Upload a file on the Upload tab first.")
         return
 
-    # Pre-compute safe fields for every row once, not inside the render loop
     prepped = []
     for r in all_rows:
         domain        = _nc_safe_str(r.get("domain"))
@@ -1223,7 +1154,6 @@ def tab_new_contacts(sh) -> None:
         contact_e     = _nc_safe_str(r.get("best_contact_email"))
         contact_title = _nc_safe_str(r.get("best_contact_title"))
 
-        # Name: use source value if clean; otherwise infer from email
         contact_n_raw  = _nc_strip_trailing_nan(_nc_safe_str(r.get("best_contact_name")))
         contact_n_real = bool(contact_n_raw)
         if contact_n_raw:
@@ -1266,9 +1196,8 @@ def tab_new_contacts(sh) -> None:
 
     available_classes = sorted({p["cls"] for p in prepped if p["cls"]})
 
-    # ── Sidebar filters (no Sheet I/O on change) ──────────────────────────────
     with st.sidebar:
-        st.markdown("### 🔍 Filter Contacts")
+        st.markdown("### Filter Contacts")
 
         show_filter = st.radio(
             "Show",
@@ -1304,16 +1233,24 @@ def tab_new_contacts(sh) -> None:
             "Sort by",
             ["Data completeness (best first)",
              "Date added (newest)", "Date added (oldest)",
-             "Company name (A–Z)", "Total spend (high–low)"],
+             "Company name (A-Z)", "Total spend (high-low)"],
             key="nc_sort",
         )
 
         st.markdown("---")
-        if st.button("🔄 Reload from Sheet", key="nc_reload"):
+        if st.button("Reload from Sheet", key="nc_reload"):
             st.session_state["nc_cache_dirty"] = True
             st.rerun()
+        sheet_id = get_secret("GSHEET_ID")
+        if sheet_id:
+            sheet_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}"
+            st.markdown(
+                f'<a href="{sheet_url}" target="_blank" style="'
+                f'font-size:0.82rem;color:#0066CC;text-decoration:none;">'
+                f'&#128196; Edit Sheet</a>',
+                unsafe_allow_html=True,
+            )
 
-    # ── Apply filters (pure Python — instant) ─────────────────────────────────
     view = prepped
 
     if show_filter == "Unreviewed only":
@@ -1337,17 +1274,15 @@ def tab_new_contacts(sh) -> None:
     if has_event_only:
         view = [p for p in view if p["has_event"]]
 
-    # ── Sort ──────────────────────────────────────────────────────────────────
     if sort_by == "Data completeness (best first)":
         view = sorted(view, key=lambda p: -p["completeness"])
     elif sort_by == "Date added (oldest)":
         view = sorted(view, key=lambda p: p["added_date"] or p["first_seen"])
-    elif sort_by == "Company name (A–Z)":
+    elif sort_by == "Company name (A-Z)":
         view = sorted(view, key=lambda p: p["company"].lower())
-    elif sort_by == "Total spend (high–low)":
+    elif sort_by == "Total spend (high-low)":
         view = sorted(view, key=lambda p: -p["spent_raw"])
 
-    # ── Summary bar ───────────────────────────────────────────────────────────
     n_unreviewed = sum(1 for p in prepped if not p["reviewed"])
     n_customers  = sum(1 for p in prepped if p["status"] == "customer")
     n_with_spend = sum(1 for p in prepped if p["spent_raw"] > 0)
@@ -1365,23 +1300,21 @@ def tab_new_contacts(sh) -> None:
         st.info("No contacts match the current filters.")
         return
 
-    # ── Bulk action ───────────────────────────────────────────────────────────
     unreviewed_in_view = [p for p in view if not p["reviewed"]]
     if unreviewed_in_view:
         if st.button(
-            f"✅ Mark all {len(unreviewed_in_view):,} shown as reviewed",
+            f"Mark all {len(unreviewed_in_view):,} shown as reviewed",
             key="nc_mark_all",
             type="secondary",
         ):
             domains_to_clear = [p["domain"] for p in unreviewed_in_view if p["domain"]]
-            with st.spinner(f"Marking {len(domains_to_clear):,} rows reviewed…"):
+            with st.spinner(f"Marking {len(domains_to_clear):,} rows reviewed..."):
                 ok = _nc_mark_reviewed(sh, domains_to_clear)
             if ok:
                 st.success(f"Marked {len(domains_to_clear):,} contacts reviewed.")
                 st.session_state["nc_cache_dirty"] = True
                 st.rerun()
 
-    # ── Pagination ────────────────────────────────────────────────────────────
     filter_fp = (
         f"{show_filter}|{status_filter}|{sorted(class_filter)}"
         f"|{has_purchase_only}|{has_event_only}|{sort_by}"
@@ -1398,13 +1331,12 @@ def tab_new_contacts(sh) -> None:
     page_view   = view[start_idx:end_idx]
 
     st.markdown(
-        f"**{len(view):,} contact(s)** · sorted by {sort_by.lower()} · "
+        f"**{len(view):,} contact(s)** - sorted by {sort_by.lower()} - "
         f"page {page + 1} of {total_pages} "
-        f"({start_idx + 1}–{min(end_idx, len(view))} of {len(view):,})"
+        f"({start_idx + 1}-{min(end_idx, len(view))} of {len(view):,})"
     )
     st.markdown("")
 
-    # ── Class color legend ────────────────────────────────────────────────────
     legend_html = " &nbsp; ".join(
         f'<span style="background:{CLASS_COLOR[c]};color:#fff;padding:1px 7px;'
         f'border-radius:3px;font-size:0.73rem;">{CLASS_LABEL[c]}</span>'
@@ -1413,7 +1345,6 @@ def tab_new_contacts(sh) -> None:
     st.markdown(legend_html, unsafe_allow_html=True)
     st.markdown("")
 
-    # ── Per-row expanders (this page only) ────────────────────────────────────
     for idx, p in enumerate(page_view):
         abs_idx       = start_idx + idx
         domain        = p["domain"]
@@ -1470,7 +1401,7 @@ def tab_new_contacts(sh) -> None:
             unsafe_allow_html=True,
         )
 
-        with st.expander(f"{company}  ·  {domain}", expanded=False):
+        with st.expander(f"{company}  .  {domain}", expanded=False):
 
             badge_html  = _nc_class_badge(cls)
             status_icon = "🟢" if status == "customer" else "⚪"
@@ -1490,13 +1421,13 @@ def tab_new_contacts(sh) -> None:
             with d1:
                 st.markdown("**Domain**")
                 st.code(domain, language=None)
-                st.markdown(f"**Added:** {first_seen or added_date or '—'}")
+                st.markdown(f"**Added:** {first_seen or added_date or '-'}")
             with d2:
                 st.markdown("**Best contact**")
                 if contact_n:
                     st.write(contact_n if contact_n_real else f"{contact_n} *(from email)*")
                 else:
-                    st.write("—")
+                    st.write("-")
                 if contact_title:
                     st.caption(contact_title)
                 if contact_e:
@@ -1510,7 +1441,7 @@ def tab_new_contacts(sh) -> None:
                 if tags:
                     st.caption(f"Tags: {', '.join(t.strip() for t in tags.split(',') if t.strip())}")
                 if has_event:
-                    st.caption("🎟 Has event tag")
+                    st.caption("Has event tag")
 
             st.markdown("")
 
@@ -1529,7 +1460,7 @@ def tab_new_contacts(sh) -> None:
                 )
 
             if (new_monitor != monitor_cur) or (new_enrich != enrich_cur):
-                with st.spinner("Saving flags…"):
+                with st.spinner("Saving flags..."):
                     _nc_write_master_flags(sh, domain, new_monitor, new_enrich)
                     _nc_write_nc_flags(sh, all_rows, domain, new_monitor, new_enrich)
                 for cached_p in st.session_state.get("nc_rows_cache", []):
@@ -1541,47 +1472,557 @@ def tab_new_contacts(sh) -> None:
 
             with t3:
                 if not reviewed:
-                    if st.button("✅ Mark reviewed", key=f"nc_rev_{abs_idx}_{domain}",
+                    if st.button("Mark reviewed", key=f"nc_rev_{abs_idx}_{domain}",
                                  type="primary"):
-                        with st.spinner("Marking reviewed…"):
+                        with st.spinner("Marking reviewed..."):
                             _nc_mark_reviewed(sh, [domain])
                         st.session_state["nc_cache_dirty"] = True
                         st.rerun()
                 else:
-                    st.caption("✓ Already reviewed")
+                    st.caption("Already reviewed")
 
-    # ── Prev / Next controls ──────────────────────────────────────────────────
     st.markdown("")
     st.markdown("---")
     nav_l, nav_mid, nav_r = st.columns([1, 3, 1])
     with nav_l:
         if page > 0:
-            if st.button("← Previous", key="nc_prev"):
+            if st.button("Previous", key="nc_prev"):
                 st.session_state["nc_page"] = page - 1
                 st.rerun()
     with nav_mid:
         st.markdown(
             f"<div style='text-align:center;color:#666;font-size:0.85rem;'>"
-            f"Page {page + 1} of {total_pages} · "
-            f"{start_idx + 1}–{min(end_idx, len(view))} of {len(view):,} contacts"
+            f"Page {page + 1} of {total_pages} - "
+            f"{start_idx + 1}-{min(end_idx, len(view))} of {len(view):,} contacts"
             f"</div>",
             unsafe_allow_html=True,
         )
     with nav_r:
         if page < total_pages - 1:
-            if st.button("Next →", key="nc_next"):
+            if st.button("Next", key="nc_next"):
                 st.session_state["nc_page"] = page + 1
                 st.rerun()
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# TAB 3 — WATCH LIST
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _wl_load(sh) -> list:
+    """Load master_companies and cache in session_state."""
+    if (
+        "wl_rows_cache" not in st.session_state
+        or st.session_state.get("wl_cache_dirty")
+    ):
+        with st.spinner("Loading Watch List from Sheet..."):
+            rows = sheet_get_all(sh, SHEET_MASTER)
+        st.session_state["wl_rows_cache"] = rows
+        st.session_state["wl_cache_dirty"] = False
+    return st.session_state["wl_rows_cache"]
+
+
+def _wl_safe_str(v) -> str:
+    if v is None:
+        return ""
+    s = str(v).strip()
+    tokens = s.lower().split()
+    if tokens and all(t == "nan" for t in tokens):
+        return ""
+    return s
+
+
+def _wl_safe_bool(v, default: bool = False) -> bool:
+    if isinstance(v, bool):
+        return v
+    return str(v).strip().upper() == "TRUE"
+
+
+def _wl_safe_float(v) -> float:
+    try:
+        return float(str(v or 0))
+    except (ValueError, TypeError):
+        return 0.0
+
+
+def _wl_safe_int(v) -> int:
+    try:
+        return int(float(str(v or 0)))
+    except (ValueError, TypeError):
+        return 0
+
+
+def _wl_tier_color(tier) -> str:
+    return {1: "#B71C1C", 2: "#E65100", 3: "#546E7A"}.get(tier, "#546E7A")
+
+
+def _wl_tier_badge(tier) -> str:
+    colors = {1: "#B71C1C", 2: "#E65100", 3: "#546E7A"}
+    labels = {1: "Tier 1", 2: "Tier 2", 3: "Tier 3"}
+    color  = colors.get(tier, "#546E7A")
+    label  = labels.get(tier, f"Tier {tier}")
+    return (
+        f'<span style="background:{color};color:#fff;padding:2px 8px;'
+        f'border-radius:4px;font-size:0.78rem;font-weight:600;">{label}</span>'
+    )
+
+
+def _wl_completeness(p: dict) -> int:
+    score = 0
+    if p.get("contact_n"): score += 1
+    if p.get("contact_e"): score += 1
+    if p.get("contact_t"): score += 1
+    if p.get("company"):   score += 1
+    if p.get("icp_label"): score += 1
+    if p.get("spent", 0) > 0: score += 1
+    return score
+
+
+def _wl_completeness_bar(score: int, max_score: int = 6) -> str:
+    filled = "<span style='color:#0066CC;font-size:0.85rem;'>&#9679;</span>"
+    empty  = "<span style='color:#CCC;font-size:0.85rem;'>&#9679;</span>"
+    return "".join(filled if i < score else empty for i in range(max_score))
+
+
 def tab_watch_list(sh) -> None:
     st.header("Watch List")
-    st.info("🔜 Coming soon — filterable master company table with detail panel.")
+    st.caption(
+        "All companies in the master list — filter by segment, tier, and status. "
+        "Expand any row to view the full company profile, sales history, and "
+        "set monitoring flags."
+    )
+
+    all_rows = _wl_load(sh)
+    if not all_rows:
+        st.info("No data loaded. Upload contacts or orders on the Upload tab first.")
+        return
+
+    # Pre-compute display fields once
+    prepped = []
+    for r in all_rows:
+        domain  = _wl_safe_str(r.get("domain"))
+        company = _wl_safe_str(r.get("company_name")) or domain
+        cls     = _wl_safe_str(r.get("domain_class")) or "commercial"
+        status  = _wl_safe_str(r.get("customer_status")) or "prospect"
+        try:
+            tier = int(float(str(r.get("watch_tier") or 2)))
+        except (ValueError, TypeError):
+            tier = 2
+
+        spent   = _wl_safe_float(r.get("total_spent"))
+        orders  = _wl_safe_int(r.get("total_orders"))
+        monitor = _wl_safe_bool(r.get("monitor"), default=True)
+        enrich  = _wl_safe_bool(r.get("enrich"),  default=False)
+
+        contact_n = _wl_safe_str(r.get("best_contact_name"))
+        contact_e = _wl_safe_str(r.get("best_contact_email"))
+        contact_t = _wl_safe_str(r.get("best_contact_title"))
+        icp_label = _wl_safe_str(r.get("icp_label"))
+        icp_conf  = _wl_safe_str(r.get("icp_confidence"))
+        enriched  = _wl_safe_bool(r.get("enriched"), default=False)
+        notes     = _wl_safe_str(r.get("notes"))
+        last_act  = _wl_safe_str(r.get("last_activity"))
+
+        p = {
+            "domain":    domain,
+            "company":   company,
+            "cls":       cls,
+            "status":    status,
+            "tier":      tier,
+            "spent":     spent,
+            "orders":    orders,
+            "monitor":   monitor,
+            "enrich":    enrich,
+            "contact_n": contact_n,
+            "contact_e": contact_e,
+            "contact_t": contact_t,
+            "icp_label": icp_label,
+            "icp_conf":  icp_conf,
+            "enriched":  enriched,
+            "notes":     notes,
+            "last_act":  last_act,
+            "_raw":      r,
+        }
+        p["completeness"] = _wl_completeness(p)
+        prepped.append(p)
+
+    available_classes = sorted({p["cls"] for p in prepped if p["cls"]})
+
+    # Sidebar filters
+    with st.sidebar:
+        st.markdown("### Filter Watch List")
+
+        class_filter = st.multiselect(
+            "Segment",
+            options=available_classes,
+            default=[],
+            placeholder="All segments",
+            key="wl_class_filter",
+        )
+
+        tier_filter = st.radio(
+            "Watch tier",
+            ["All", "Tier 1", "Tier 2", "Tier 3"],
+            index=0,
+            key="wl_tier_filter",
+        )
+
+        status_filter = st.radio(
+            "Customer status",
+            ["All", "Customers", "Prospects"],
+            index=0,
+            key="wl_status_filter",
+        )
+
+        has_purchase_only = st.checkbox(
+            "Has purchases", value=False, key="wl_has_purchase"
+        )
+        monitor_only = st.checkbox(
+            "Monitor flagged", value=False, key="wl_monitor_only"
+        )
+        enriched_only = st.checkbox(
+            "Enriched only", value=False, key="wl_enriched_only"
+        )
+
+        st.markdown("---")
+        sort_by = st.selectbox(
+            "Sort by",
+            [
+                "Total spend (high-low)",
+                "Company (A-Z)",
+                "Watch tier (1 first)",
+                "Last activity (newest)",
+            ],
+            key="wl_sort",
+        )
+
+        st.markdown("---")
+        if st.button("Reload from Sheet", key="wl_reload"):
+            st.session_state["wl_cache_dirty"] = True
+            st.rerun()
+        sheet_id = get_secret("GSHEET_ID")
+        if sheet_id:
+            sheet_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}"
+            st.markdown(
+                f'<a href="{sheet_url}" target="_blank" style="'
+                f'font-size:0.82rem;color:#0066CC;text-decoration:none;">'
+                f'&#128196; Edit Sheet</a>',
+                unsafe_allow_html=True,
+            )
+
+    # Apply filters
+    view = prepped
+
+    if class_filter:
+        view = [p for p in view if p["cls"] in class_filter]
+
+    if tier_filter != "All":
+        tier_num = int(tier_filter.split()[1])
+        view = [p for p in view if p["tier"] == tier_num]
+
+    if status_filter == "Customers":
+        view = [p for p in view if p["status"] == "customer"]
+    elif status_filter == "Prospects":
+        view = [p for p in view if p["status"] != "customer"]
+
+    if has_purchase_only:
+        view = [p for p in view if p["spent"] > 0]
+
+    if monitor_only:
+        view = [p for p in view if p["monitor"]]
+
+    if enriched_only:
+        view = [p for p in view if p["enriched"]]
+
+    # Sort
+    if sort_by == "Company (A-Z)":
+        view = sorted(view, key=lambda p: p["company"].lower())
+    elif sort_by == "Watch tier (1 first)":
+        view = sorted(view, key=lambda p: (p["tier"], -p["spent"]))
+    elif sort_by == "Last activity (newest)":
+        view = sorted(view, key=lambda p: p["last_act"] or "", reverse=True)
+    else:
+        view = sorted(view, key=lambda p: -p["spent"])
+
+    # Summary metrics
+    n_tier1    = sum(1 for p in prepped if p["tier"] == 1)
+    n_customer = sum(1 for p in prepped if p["status"] == "customer")
+    n_purchase = sum(1 for p in prepped if p["spent"] > 0)
+    total_rev  = sum(p["spent"] for p in prepped)
+
+    m1, m2, m3, m4, m5 = st.columns(5)
+    m1.metric("Total companies", f"{len(prepped):,}")
+    m2.metric("Tier 1 Active",   f"{n_tier1:,}")
+    m3.metric("Customers",       f"{n_customer:,}")
+    m4.metric("With purchases",  f"{n_purchase:,}")
+    m5.metric("Total revenue",   format_currency(total_rev))
+
+    st.markdown("---")
+
+    if not view:
+        st.info("No companies match the current filters.")
+        return
+
+    # Pagination
+    filter_fp = (
+        f"{sorted(class_filter)}|{tier_filter}|{status_filter}"
+        f"|{has_purchase_only}|{monitor_only}|{enriched_only}|{sort_by}"
+    )
+    if st.session_state.get("wl_filter_fp") != filter_fp:
+        st.session_state["wl_filter_fp"] = filter_fp
+        st.session_state["wl_page"] = 0
+
+    total_pages = max(1, math.ceil(len(view) / NC_PAGE_SIZE))
+    page        = min(st.session_state.get("wl_page", 0), total_pages - 1)
+    st.session_state["wl_page"] = page
+    start_idx   = page * NC_PAGE_SIZE
+    end_idx     = start_idx + NC_PAGE_SIZE
+    page_view   = view[start_idx:end_idx]
+
+    st.markdown(
+        f"**{len(view):,} compan{'y' if len(view) == 1 else 'ies'}** - "
+        f"sorted by {sort_by.lower()} - "
+        f"page {page + 1} of {total_pages} "
+        f"({start_idx + 1}-{min(end_idx, len(view))} of {len(view):,})"
+    )
+    st.markdown("")
+
+    legend_html = " &nbsp; ".join(
+        f'<span style="background:{CLASS_COLOR[c]};color:#fff;padding:1px 7px;'
+        f'border-radius:3px;font-size:0.73rem;">{CLASS_LABEL[c]}</span>'
+        for c in available_classes if c in CLASS_COLOR
+    )
+    st.markdown(legend_html, unsafe_allow_html=True)
+    st.markdown("")
+
+    # Per-row expanders
+    for idx, p in enumerate(page_view):
+        abs_idx = start_idx + idx
+        domain  = p["domain"]
+        company = p["company"]
+        cls     = p["cls"]
+        tier    = p["tier"]
+        spent   = p["spent"]
+        orders  = p["orders"]
+        monitor = p["monitor"]
+        enrich  = p["enrich"]
+
+        cls_dot_color = CLASS_COLOR.get(cls, "#546E7A")
+        cls_dot = (
+            f'<span style="display:inline-block;width:10px;height:10px;'
+            f'border-radius:50%;background:{cls_dot_color};margin-right:4px;"></span>'
+        )
+
+        tier_color = _wl_tier_color(tier)
+        tier_pill = (
+            f' <span style="background:{tier_color};color:#fff;padding:1px 6px;'
+            f'border-radius:3px;font-size:0.72rem;font-weight:600;">T{tier}</span>'
+        )
+
+        spend_pill = (
+            f' <span style="background:#1B5E20;color:#fff;padding:1px 6px;'
+            f'border-radius:3px;font-size:0.72rem;font-weight:600;">'
+            f'{format_currency(spent)}</span>'
+        ) if spent > 0 else ""
+
+        mon_indicator    = " 📡" if monitor else ""
+        completeness_bar = _wl_completeness_bar(p["completeness"])
+
+        label_html = (
+            f"{cls_dot}<b>{company}</b> &nbsp;"
+            f"<span style='color:#888;font-size:0.85rem;'>{domain}</span>"
+            f"{tier_pill}{spend_pill}"
+            f" &nbsp; {completeness_bar}"
+            f"<span style='color:#0066CC;font-size:0.8rem;'>{mon_indicator}</span>"
+        )
+        st.markdown(
+            f'<div style="margin-bottom:-10px;padding:4px 2px;font-size:0.88rem;">'
+            f'{label_html}</div>',
+            unsafe_allow_html=True,
+        )
+
+        with st.expander(f"{company}  .  {domain}", expanded=False):
+
+            # Section 1 — Profile
+            seg_color  = CLASS_COLOR.get(cls, "#546E7A")
+            seg_label  = CLASS_LABEL.get(cls, cls.title())
+            badge_html = (
+                f'<span style="background:{seg_color};color:#fff;padding:2px 8px;'
+                f'border-radius:4px;font-size:0.78rem;font-weight:600;">{seg_label}</span>'
+            )
+            tier_badge_h = _wl_tier_badge(tier)
+            status_icon  = "🟢" if p["status"] == "customer" else "⚪"
+            st.markdown(
+                f"{badge_html} &nbsp; {tier_badge_h} &nbsp; "
+                f"{status_icon} &nbsp; "
+                f"<span style='font-size:0.85rem;color:#555;'>{p['status'].title()}</span>",
+                unsafe_allow_html=True,
+            )
+            st.markdown("")
+
+            d1, d2, d3 = st.columns(3)
+            with d1:
+                st.markdown("**Domain**")
+                st.code(domain, language=None)
+                if p["last_act"]:
+                    st.caption(f"Last activity: {p['last_act'][:10]}")
+            with d2:
+                st.markdown("**Best contact**")
+                st.write(p["contact_n"] or "-")
+                if p["contact_t"]:
+                    st.caption(p["contact_t"])
+                if p["contact_e"]:
+                    st.caption(p["contact_e"])
+            with d3:
+                st.markdown("**ICP classification**")
+                if p["icp_label"]:
+                    conf_color = {
+                        "High":   "#2E7D32",
+                        "Medium": "#E65100",
+                        "Low":    "#B71C1C",
+                    }.get(p["icp_conf"], "#555")
+                    st.markdown(
+                        f"{p['icp_label']} &nbsp; "
+                        f'<span style="color:{conf_color};font-size:0.8rem;">'
+                        f"{p['icp_conf'] or ''}</span>",
+                        unsafe_allow_html=True,
+                    )
+                else:
+                    st.write("Not yet enriched")
+
+            st.markdown("")
+
+            t1, t2 = st.columns([1, 1])
+            with t1:
+                new_monitor = st.checkbox(
+                    "Monitor", value=monitor,
+                    key=f"wl_mon_{abs_idx}_{domain}",
+                    help="Add to active signal-monitoring queue.",
+                )
+            with t2:
+                new_enrich = st.checkbox(
+                    "Enrich", value=enrich,
+                    key=f"wl_enr_{abs_idx}_{domain}",
+                    help="Queue for homepage scrape + ICP classification.",
+                )
+
+            if (new_monitor != monitor) or (new_enrich != enrich):
+                with st.spinner("Saving flags..."):
+                    try:
+                        ws, col, dom_idx_map = _sheet_index(sh)
+                        if domain in dom_idx_map:
+                            r_idx = dom_idx_map[domain]
+                            flag_updates = []
+                            if "monitor" in col:
+                                flag_updates.append(
+                                    (r_idx + 1, col["monitor"] + 1, str(new_monitor))
+                                )
+                            if "enrich" in col:
+                                flag_updates.append(
+                                    (r_idx + 1, col["enrich"] + 1, str(new_enrich))
+                                )
+                            if flag_updates:
+                                _batch_update(ws, flag_updates)
+                    except Exception as ex:
+                        st.warning(f"Could not save flags: {ex}")
+                for cached_p in st.session_state.get("wl_rows_cache", []):
+                    if cached_p.get("domain") == domain:
+                        cached_p["monitor"] = str(new_monitor)
+                        cached_p["enrich"]  = str(new_enrich)
+                        break
+                st.toast(f"Flags updated for {company}.", icon="✅")
+
+            st.markdown("")
+            new_notes = st.text_area(
+                "Notes",
+                value=p["notes"],
+                key=f"wl_notes_{abs_idx}_{domain}",
+                height=72,
+                label_visibility="visible",
+                placeholder="Add notes about this company...",
+            )
+            if st.button("Save notes", key=f"wl_save_notes_{abs_idx}_{domain}"):
+                with st.spinner("Saving..."):
+                    try:
+                        ws, col, dom_idx_map = _sheet_index(sh)
+                        if domain in dom_idx_map and "notes" in col:
+                            r_idx = dom_idx_map[domain]
+                            _batch_update(ws, [(r_idx + 1, col["notes"] + 1, new_notes)])
+                            for cached_p in st.session_state.get("wl_rows_cache", []):
+                                if cached_p.get("domain") == domain:
+                                    cached_p["notes"] = new_notes
+                                    break
+                            st.toast("Notes saved.", icon="✅")
+                    except Exception as ex:
+                        st.warning(f"Could not save notes: {ex}")
+
+            # Section 2 — Sales History
+            st.markdown("---")
+            st.markdown("**Sales History**")
+            if orders > 0:
+                c1, c2 = st.columns(2)
+                c1.metric("Total spent",  format_currency(spent))
+                c2.metric("Total orders", orders)
+                with st.spinner("Loading order details..."):
+                    order_data = [
+                        row for row in sheet_get_all(sh, SHEET_ORDERS)
+                        if _wl_safe_str(row.get("domain")) == domain
+                    ]
+                if order_data:
+                    for o in order_data[:20]:
+                        o_date    = _wl_safe_str(o.get("order_date"))[:10]
+                        o_product = _wl_safe_str(o.get("product_name")) or "-"
+                        o_price   = _wl_safe_float(o.get("line_item_price"))
+                        o_qty     = _wl_safe_int(o.get("quantity"))
+                        st.markdown(
+                            f"<span style='color:#888;font-size:0.8rem;'>{o_date}</span>"
+                            f" &nbsp; {o_product} &nbsp; "
+                            f"<span style='color:#2E7D32;font-size:0.8rem;'>"
+                            f"x{o_qty} &nbsp; {format_currency(o_price)}</span>",
+                            unsafe_allow_html=True,
+                        )
+                    if len(order_data) > 20:
+                        st.caption(
+                            f"... and {len(order_data) - 20} more line items. "
+                            f"Open Sheet for full history."
+                        )
+            else:
+                st.caption("No purchases on record.")
+
+            # Section 3 — Signals (Phase 3 placeholder)
+            st.markdown("---")
+            st.caption("Signal monitoring coming in Phase 3.")
+
+            # Section 4 — Outreach (Phase 3 placeholder)
+            st.markdown("---")
+            st.caption("Outreach generator coming in Phase 3.")
+
+    # Prev / Next
+    st.markdown("")
+    st.markdown("---")
+    nav_l, nav_mid, nav_r = st.columns([1, 3, 1])
+    with nav_l:
+        if page > 0:
+            if st.button("Previous", key="wl_prev"):
+                st.session_state["wl_page"] = page - 1
+                st.rerun()
+    with nav_mid:
+        st.markdown(
+            f"<div style='text-align:center;color:#666;font-size:0.85rem;'>"
+            f"Page {page + 1} of {total_pages} - "
+            f"{start_idx + 1}-{min(end_idx, len(view))} of {len(view):,} companies"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+    with nav_r:
+        if page < total_pages - 1:
+            if st.button("Next", key="wl_next"):
+                st.session_state["wl_page"] = page + 1
+                st.rerun()
 
 
 def tab_ham(sh) -> None:
     st.header("HAM Radio")
-    st.info("🔜 Coming soon — HAM segment signal feed and outreach queue.")
+    st.info("Coming soon — HAM segment signal feed and outreach queue.")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1599,10 +2040,10 @@ def main() -> None:
         ">
             <span style="color:#FFFFFF; font-size:1.5rem; font-weight:700;
                          letter-spacing:0.02em;">
-                📡 UNI-T Customer Lead Dashboard
+                UNI-T Customer Lead Dashboard
             </span>
             <span style="color:#B3D1F5; font-size:0.9rem; margin-left:16px;">
-                Signal-driven B2B prospecting · North America
+                Signal-driven B2B prospecting - North America
             </span>
         </div>
         """,
@@ -1614,11 +2055,11 @@ def main() -> None:
         st.error(
             "**Google Sheets connection failed.** "
             "Check that GOOGLE_SERVICE_ACCOUNT and GSHEET_ID are set in "
-            "Streamlit Cloud → Settings → Secrets."
+            "Streamlit Cloud - Settings - Secrets."
         )
         st.stop()
 
-    tabs = st.tabs(["📤 Upload", "🆕 New Contacts", "👁 Watch List", "📻 HAM"])
+    tabs = st.tabs(["Upload", "New Contacts", "Watch List", "HAM"])
 
     with tabs[0]: tab_upload(sh)
     with tabs[1]: tab_new_contacts(sh)
