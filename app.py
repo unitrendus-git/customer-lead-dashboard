@@ -614,7 +614,6 @@ def _write_order_results(sh, result, filename, progress, pct_base, n_files):
                     updates_needed.append((r + 1, col["company_name"] + 1, _sanitize_value(stats["company"])))
             if updates_needed: _batch_update(ws, updates_needed)
 
-            # Sync new_contacts
             try:
                 nc_ws   = sh.worksheet(SHEET_NEW_CONTACTS)
                 nc_vals = nc_ws.get_all_values()
@@ -1071,6 +1070,33 @@ def _wl_safe_int(v):
     try:   return int(float(str(v or 0)))
     except: return 0
 
+def _wl_strip_nan(s):
+    """Remove nan tokens from name strings -- artifact of pandas NaN bleed."""
+    import re as _re
+    s = _re.sub(r"(?i)\s*\bnan\b\s*$", "", s).strip()
+    s = _re.sub(r"(?i)^\s*\bnan\b\s*", "", s).strip()
+    return _re.sub(r"  +", " ", s).strip()
+
+def _wl_infer_name(email):
+    """Best-guess display name from email local-part."""
+    if not email or "@" not in email: return ""
+    import re
+    local = email.split("@")[0].lower()
+    parts = [p for p in re.split(r"[._\-0-9]+", local) if len(p) > 1]
+    if not parts or all(len(p) <= 1 for p in parts): return ""
+    return " ".join(p.title() for p in parts[:2])
+
+def _wl_name_matches_email(name, email):
+    """
+    Return True if at least one name token (3+ chars) appears in the email local-part.
+    Catches mismatches like 'Niu, Simiao nan' vs 'kevin.wine@rutgers.edu'.
+    """
+    if not name or not email or "@" not in email: return False
+    import re
+    local  = email.split("@")[0].lower()
+    tokens = [t.lower() for t in re.split(r"[\s,._\-]+", name) if len(t) >= 3]
+    return any(tok in local for tok in tokens)
+
 def _wl_tier_color(tier):
     return {1: "#B71C1C", 2: "#E65100", 3: "#546E7A"}.get(tier, "#9E9E9E")
 
@@ -1114,16 +1140,24 @@ def tab_watch_list(sh):
         status  = _wl_safe_str(r.get("customer_status")) or "prospect"
         try:   tier = int(float(str(r.get("watch_tier") or 2)))
         except: tier = 2
-        # Clamp tier to valid range 1-3
-        tier = max(1, min(3, tier)) if tier in (1, 2, 3) else 2
+        # Clamp to valid 1-3 range; any out-of-range value (e.g. old score data) becomes 2
+        if tier not in (1, 2, 3): tier = 2
 
         spent     = _wl_safe_float(r.get("total_spent"))
         orders    = _wl_safe_int(r.get("total_orders"))
         monitor   = _wl_safe_bool(r.get("monitor"), default=True)
         enrich    = _wl_safe_bool(r.get("enrich"),  default=False)
-        contact_n = _wl_safe_str(r.get("best_contact_name"))
-        contact_e = _wl_safe_str(r.get("best_contact_email"))
-        contact_t = _wl_safe_str(r.get("best_contact_title"))
+
+        # Name cleaning: strip nan artifacts, then validate against email
+        contact_e     = _wl_safe_str(r.get("best_contact_email"))
+        contact_t     = _wl_safe_str(r.get("best_contact_title"))
+        contact_n_raw = _wl_strip_nan(_wl_safe_str(r.get("best_contact_name")))
+        if contact_n_raw and contact_e and not _wl_name_matches_email(contact_n_raw, contact_e):
+            # Name doesn't match email -- prefer email-derived name, fall back to stored name
+            contact_n = _wl_infer_name(contact_e) or contact_n_raw
+        else:
+            contact_n = contact_n_raw or _wl_infer_name(contact_e)
+
         icp_label = _wl_safe_str(r.get("icp_label"))
         icp_conf  = _wl_safe_str(r.get("icp_confidence"))
         enriched  = _wl_safe_bool(r.get("enriched"), default=False)
@@ -1194,7 +1228,7 @@ def tab_watch_list(sh):
         st.info("No companies match the current filters.")
         return
 
-    # Inline tier quick-filter buttons — always on canvas, no sidebar needed
+    # Inline tier quick-filter buttons
     t_counts = {t: sum(1 for p in view if p["tier"] == t) for t in [1, 2, 3]}
     active_qt = st.session_state.get("wl_quick_tier")
     qcols = st.columns(4)
@@ -1208,7 +1242,6 @@ def tab_watch_list(sh):
                 st.session_state["wl_page"] = 0
                 st.rerun()
 
-    # Apply quick-tier filter on top of sidebar tier filter
     qt = st.session_state.get("wl_quick_tier")
     if qt is not None:
         view = [p for p in view if p["tier"] == qt]
