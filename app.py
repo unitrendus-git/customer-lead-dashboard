@@ -96,6 +96,7 @@ HAM_SIGNALS = {"arrl", "qrz", "hamradio", "ham"}
 
 BATCH_SIZE  = 200   # rows per append call
 BATCH_DELAY = 1.0   # seconds between append batches
+NC_PAGE_SIZE = 50   # contacts per page in New Contacts tab
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1136,7 +1137,7 @@ def tab_new_contacts(sh) -> None:
         st.info("No contacts match the current filters.")
         return
 
-    # ── Bulk action (only for unreviewed view) ────────────────────────────────
+    # ── Bulk action (only for unreviewed view) ───────────────────────────────
     unreviewed_in_view = [p for p in view if not p["reviewed"]]
     if unreviewed_in_view:
         if st.button(
@@ -1152,9 +1153,29 @@ def tab_new_contacts(sh) -> None:
                 st.session_state["nc_cache_dirty"] = True
                 st.rerun()
 
+    # ── Pagination ───────────────────────────────────────────────────────────────
+    # Fingerprint the current filter+sort state. When it changes, snap back
+    # to page 0 so the user never lands mid-list after a filter change.
+    filter_fp = (
+        f"{show_filter}|{status_filter}|{sorted(class_filter)}"
+        f"|{has_purchase_only}|{has_event_only}|{sort_by}"
+    )
+    if st.session_state.get("nc_filter_fp") != filter_fp:
+        st.session_state["nc_filter_fp"] = filter_fp
+        st.session_state["nc_page"] = 0
+
+    total_pages = max(1, math.ceil(len(view) / NC_PAGE_SIZE))
+    page        = min(st.session_state.get("nc_page", 0), total_pages - 1)
+    st.session_state["nc_page"] = page
+    start_idx   = page * NC_PAGE_SIZE
+    end_idx     = start_idx + NC_PAGE_SIZE
+    page_view   = view[start_idx:end_idx]
+
+    # Page header
     st.markdown(
-        f"**{len(view):,} contact(s)** · "
-        f"sorted by {sort_by.lower()}"
+        f"**{len(view):,} contact(s)** · sorted by {sort_by.lower()} · "
+        f"page {page + 1} of {total_pages} "
+        f"({start_idx + 1}–{min(end_idx, len(view))} of {len(view):,})"
     )
     st.markdown("")
 
@@ -1167,8 +1188,9 @@ def tab_new_contacts(sh) -> None:
     st.markdown(legend_html, unsafe_allow_html=True)
     st.markdown("")
 
-    # ── Per-row expanders ─────────────────────────────────────────────────────
-    for idx, p in enumerate(view):
+    # ── Per-row expanders (this page only) ──────────────────────────────────
+    for idx, p in enumerate(page_view):
+        abs_idx = start_idx + idx  # stable key across pages
         domain      = p["domain"]
         company     = p["company"]
         cls         = p["cls"]
@@ -1286,14 +1308,14 @@ def tab_new_contacts(sh) -> None:
                 new_monitor = st.checkbox(
                     "Monitor",
                     value=monitor_cur,
-                    key=f"nc_mon_{idx}_{domain}",
+                    key=f"nc_mon_{abs_idx}_{domain}",
                     help="Add to the active signal-monitoring queue.",
                 )
             with t2:
                 new_enrich = st.checkbox(
                     "Enrich",
                     value=enrich_cur,
-                    key=f"nc_enr_{idx}_{domain}",
+                    key=f"nc_enr_{abs_idx}_{domain}",
                     help="Queue for homepage scrape + ICP classification.",
                 )
 
@@ -1314,7 +1336,7 @@ def tab_new_contacts(sh) -> None:
                 if not reviewed:
                     if st.button(
                         "✅ Mark reviewed",
-                        key=f"nc_rev_{idx}_{domain}",
+                        key=f"nc_rev_{abs_idx}_{domain}",
                         type="primary",
                     ):
                         with st.spinner("Marking reviewed…"):
@@ -1323,6 +1345,29 @@ def tab_new_contacts(sh) -> None:
                         st.rerun()
                 else:
                     st.caption("✓ Already reviewed")
+
+    # ── Prev / Next controls ───────────────────────────────────────────────────
+    st.markdown("")
+    st.markdown("---")
+    nav_l, nav_mid, nav_r = st.columns([1, 3, 1])
+    with nav_l:
+        if page > 0:
+            if st.button("← Previous", key="nc_prev"):
+                st.session_state["nc_page"] = page - 1
+                st.rerun()
+    with nav_mid:
+        st.markdown(
+            f"<div style='text-align:center;color:#666;font-size:0.85rem;'>"
+            f"Page {page + 1} of {total_pages} · "
+            f"{start_idx + 1}–{min(end_idx, len(view))} of {len(view):,} contacts"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+    with nav_r:
+        if page < total_pages - 1:
+            if st.button("Next →", key="nc_next"):
+                st.session_state["nc_page"] = page + 1
+                st.rerun()
 
 
 def tab_watch_list(sh) -> None:
