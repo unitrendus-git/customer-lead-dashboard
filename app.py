@@ -886,8 +886,66 @@ def _nc_safe_str(v) -> str:
     """Return string form of v, collapsing None/nan/float-nan to empty string."""
     if v is None:
         return ""
-    s = str(v)
-    return "" if s.lower() == "nan" else s
+    s = str(v).strip()
+    # Reject bare 'nan', 'nan nan', 'nan nan nan', etc.
+    tokens = s.lower().split()
+    if tokens and all(t == "nan" for t in tokens):
+        return ""
+    return s
+
+
+def _nc_infer_name_from_email(email: str) -> str:
+    """
+    Extract a best-guess display name from an email local-part.
+    jimmylee        -> "Jimmylee"  (single token, title-case)
+    jimmy.lee       -> "Jimmy Lee" (dot-separated)
+    jimmy_lee       -> "Jimmy Lee" (underscore-separated)
+    j.lee / jlee   -> ""           (too short to be useful — suppress)
+    jimmy.lee.phd  -> "Jimmy Lee"  (take first two tokens only)
+    """
+    if not email or "@" not in email:
+        return ""
+    local = email.split("@")[0].lower()
+    # Split on dots, underscores, hyphens, digits
+    import re
+    parts = [p for p in re.split(r'[._\-0-9]+', local) if len(p) > 1]
+    if not parts:
+        return ""
+    # Suppress if looks like initials only (all single char after split)
+    if all(len(p) <= 1 for p in parts):
+        return ""
+    # Take at most first two meaningful tokens as first/last name
+    name_parts = parts[:2]
+    return " ".join(p.title() for p in name_parts)
+
+
+def _nc_completeness(p: dict) -> int:
+    """
+    Score a prepped contact row 0-5 based on data richness.
+    Used for ranking: higher = more actionable.
+      +1  has best_contact_name (real, not inferred)
+      +1  has best_contact_email
+      +1  has best_contact_title
+      +1  has company_name (not just domain fallback)
+      +1  has tags
+      +1  has purchases
+    Max 6; display as filled dots out of 6.
+    """
+    score = 0
+    if p.get("contact_n_real"):   score += 1   # name from source, not inferred
+    if p.get("contact_e"):        score += 1
+    if p.get("contact_title"):    score += 1
+    if p.get("company_real"):     score += 1   # company from source, not domain fallback
+    if p.get("tags"):             score += 1
+    if p.get("spent_raw", 0) > 0: score += 1
+    return score
+
+
+def _nc_completeness_bar(score: int, max_score: int = 6) -> str:
+    """Return an HTML filled/empty dot bar representing completeness."""
+    filled = "<span style='color:#0066CC;font-size:0.85rem;'>&#9679;</span>"
+    empty  = "<span style='color:#CCC;font-size:0.85rem;'>&#9679;</span>"
+    return "".join(filled if i < score else empty for i in range(max_score))
 
 
 def _nc_load(sh) -> list:
@@ -924,11 +982,25 @@ def tab_new_contacts(sh) -> None:
     # Pre-compute safe fields for every row once, not inside the render loop
     prepped = []
     for r in all_rows:
-        domain  = _nc_safe_str(r.get("domain"))
-        company = _nc_safe_str(r.get("company_name")) or domain
-        cls     = _nc_safe_str(r.get("domain_class")) or "commercial"
-        status  = _nc_safe_str(r.get("customer_status")) or "prospect"
-        tags    = _nc_safe_str(r.get("tags"))
+        domain       = _nc_safe_str(r.get("domain"))
+        company_raw  = _nc_safe_str(r.get("company_name"))
+        company_real = bool(company_raw)          # True = came from source data
+        company      = company_raw or domain
+        cls          = _nc_safe_str(r.get("domain_class")) or "commercial"
+        status       = _nc_safe_str(r.get("customer_status")) or "prospect"
+        tags         = _nc_safe_str(r.get("tags"))
+        contact_e    = _nc_safe_str(r.get("best_contact_email"))
+        contact_title = _nc_safe_str(r.get("best_contact_title"))
+
+        # Name: use source value if clean; otherwise infer from email
+        contact_n_raw  = _nc_safe_str(r.get("best_contact_name"))
+        contact_n_real = bool(contact_n_raw)      # True = came from source data
+        if contact_n_raw:
+            contact_n = contact_n_raw
+        else:
+            inferred  = _nc_infer_name_from_email(contact_e)
+            contact_n = inferred   # may still be "" if email not parseable
+
         try:
             spent_raw = float(str(r.get("total_spent") or 0))
         except (ValueError, TypeError):
@@ -937,24 +1009,30 @@ def tab_new_contacts(sh) -> None:
             orders_raw = int(float(str(r.get("total_orders") or 0)))
         except (ValueError, TypeError):
             orders_raw = 0
-        prepped.append({
-            "domain":      domain,
-            "company":     company,
-            "cls":         cls,
-            "status":      status,
-            "spent_raw":   spent_raw,
-            "orders_raw":  orders_raw,
-            "tags":        tags,
-            "has_event":   _nc_safe_str(r.get("has_event_tag")).strip() == "True",
-            "contact_n":   _nc_safe_str(r.get("best_contact_name")),
-            "contact_e":   _nc_safe_str(r.get("best_contact_email")),
-            "first_seen":  _nc_safe_str(r.get("first_seen")),
-            "added_date":  _nc_safe_str(r.get("added_date")),
-            "monitor_cur": _nc_safe_str(r.get("monitor", "True")).strip() == "True",
-            "enrich_cur":  _nc_safe_str(r.get("enrich",  "False")).strip() == "True",
-            "reviewed":    _nc_safe_str(r.get("reviewed")).strip() == "True",
-            "_raw":        r,
-        })
+
+        p = {
+            "domain":         domain,
+            "company":        company,
+            "company_real":   company_real,
+            "cls":            cls,
+            "status":         status,
+            "spent_raw":      spent_raw,
+            "orders_raw":     orders_raw,
+            "tags":           tags,
+            "has_event":      _nc_safe_str(r.get("has_event_tag")).strip() == "True",
+            "contact_n":      contact_n,
+            "contact_n_real": contact_n_real,
+            "contact_e":      contact_e,
+            "contact_title":  contact_title,
+            "first_seen":     _nc_safe_str(r.get("first_seen")),
+            "added_date":     _nc_safe_str(r.get("added_date")),
+            "monitor_cur":    _nc_safe_str(r.get("monitor", "True")).strip() == "True",
+            "enrich_cur":     _nc_safe_str(r.get("enrich",  "False")).strip() == "True",
+            "reviewed":       _nc_safe_str(r.get("reviewed")).strip() == "True",
+            "_raw":           r,
+        }
+        p["completeness"] = _nc_completeness(p)
+        prepped.append(p)
 
     available_classes = sorted({p["cls"] for p in prepped if p["cls"]})
     has_customers     = any(p["status"] == "customer" for p in prepped)
@@ -996,7 +1074,8 @@ def tab_new_contacts(sh) -> None:
         st.markdown("---")
         sort_by = st.selectbox(
             "Sort by",
-            ["Date added (newest)", "Date added (oldest)",
+            ["Data completeness (best first)",
+             "Date added (newest)", "Date added (oldest)",
              "Company name (A–Z)", "Total spend (high–low)"],
             key="nc_sort",
         )
@@ -1029,7 +1108,9 @@ def tab_new_contacts(sh) -> None:
         view = [p for p in view if p["has_event"]]
 
     # ── Sort ──────────────────────────────────────────────────────────────────
-    if sort_by == "Date added (oldest)":
+    if sort_by == "Data completeness (best first)":
+        view = sorted(view, key=lambda p: -p["completeness"])
+    elif sort_by == "Date added (oldest)":
         view = sorted(view, key=lambda p: p["added_date"] or p["first_seen"])
     elif sort_by == "Company name (A–Z)":
         view = sorted(view, key=lambda p: p["company"].lower())
@@ -1097,7 +1178,9 @@ def tab_new_contacts(sh) -> None:
         tags        = p["tags"]
         has_event   = p["has_event"]
         contact_n   = p["contact_n"]
+        contact_n_real = p["contact_n_real"]
         contact_e   = p["contact_e"]
+        contact_title = p["contact_title"]
         first_seen  = p["first_seen"]
         added_date  = p["added_date"]
         monitor_cur = p["monitor_cur"]
@@ -1128,10 +1211,13 @@ def tab_new_contacts(sh) -> None:
             event_pill = ""
 
         rev_indicator = " ✓" if reviewed else ""
+        completeness_bar = _nc_completeness_bar(p["completeness"])
         label_html = (
             f"{cls_dot}<b>{company}</b> &nbsp;"
             f"<span style='color:#888;font-size:0.85rem;'>{domain}</span>"
-            f"{spend_pill}{event_pill}{rev_indicator}"
+            f"{spend_pill}{event_pill}"
+            f" &nbsp; {completeness_bar}"
+            f"{rev_indicator}"
         )
         # st.expander doesn't accept HTML in its label, so we render a
         # markdown summary line above the expander as the visual signal row
@@ -1169,7 +1255,15 @@ def tab_new_contacts(sh) -> None:
                 st.markdown(f"**Added:** {date_label}")
             with d2:
                 st.markdown("**Best contact**")
-                st.write(contact_n or "—")
+                if contact_n:
+                    name_display = contact_n
+                    if not contact_n_real:
+                        name_display += " *(from email)*"
+                    st.write(name_display)
+                else:
+                    st.write("—")
+                if contact_title:
+                    st.caption(contact_title)
                 if contact_e:
                     st.caption(contact_e)
             with d3:
