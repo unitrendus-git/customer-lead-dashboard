@@ -745,11 +745,12 @@ def _write_order_results(sh, result: dict, filename: str,
 
                 spent = _sanitize_value(round(stats["total_spent"], 2))
                 for field, value in [
-                    ("total_spent",   spent),
-                    ("total_orders",  stats["total_orders"]),
-                    ("has_purchases", "True"),
-                    ("in_shopify",    "True"),
-                    ("last_activity", now_str()),
+                    ("total_spent",     spent),
+                    ("total_orders",    stats["total_orders"]),
+                    ("has_purchases",   "True"),
+                    ("customer_status", "customer"),
+                    ("in_shopify",      "True"),
+                    ("last_activity",   now_str()),
                 ]:
                     if field in col:
                         updates_needed.append((r + 1, col[field] + 1, value))
@@ -768,6 +769,37 @@ def _write_order_results(sh, result: dict, filename: str,
                     pct_base + 0.85 / n_files,
                     text=f"Writing spend updates for {len(domain_totals):,} domains…")
                 _batch_update(ws, updates_needed)
+
+            # ── Also promote customer_status + has_purchases in new_contacts ──
+            # new_contacts mirrors key fields from master; update them in sync.
+            try:
+                nc_ws      = sh.worksheet(SHEET_NEW_CONTACTS)
+                nc_vals    = nc_ws.get_all_values()
+                if nc_vals:
+                    nc_hdrs    = nc_vals[0]
+                    nc_dom_col = nc_hdrs.index("domain") if "domain" in nc_hdrs else 0
+                    nc_status_col = nc_hdrs.index("customer_status") + 1 \
+                                    if "customer_status" in nc_hdrs else None
+                    nc_spent_col  = nc_hdrs.index("total_spent") + 1 \
+                                    if "total_spent" in nc_hdrs else None
+                    nc_orders_col = nc_hdrs.index("total_orders") + 1 \
+                                    if "total_orders" in nc_hdrs else None
+                    nc_updates = []
+                    for i, row_vals in enumerate(nc_vals[1:], start=2):
+                        d = row_vals[nc_dom_col]
+                        if d in domain_totals:
+                            s = domain_totals[d]
+                            if nc_status_col:
+                                nc_updates.append((i, nc_status_col, "customer"))
+                            if nc_spent_col:
+                                nc_updates.append((i, nc_spent_col,
+                                                   round(s["total_spent"], 2)))
+                            if nc_orders_col:
+                                nc_updates.append((i, nc_orders_col, s["total_orders"]))
+                    if nc_updates:
+                        _batch_update(nc_ws, nc_updates)
+            except Exception as ex:
+                st.warning(f"new_contacts customer sync error: {ex}")
 
         except Exception as ex:
             st.warning(f"Spend update error: {ex}")
@@ -1045,7 +1077,7 @@ def tab_new_contacts(sh) -> None:
 
         show_filter = st.radio(
             "Show",
-            ["Unreviewed only", "All contacts", "Reviewed only"],
+            ["Unreviewed only", "All contacts", "Customers", "Reviewed only"],
             index=0,
             key="nc_show_filter",
         )
@@ -1091,6 +1123,8 @@ def tab_new_contacts(sh) -> None:
 
     if show_filter == "Unreviewed only":
         view = [p for p in view if not p["reviewed"]]
+    elif show_filter == "Customers":
+        view = [p for p in view if p["status"] == "customer"]
     elif show_filter == "Reviewed only":
         view = [p for p in view if p["reviewed"]]
 
@@ -1233,13 +1267,17 @@ def tab_new_contacts(sh) -> None:
             event_pill = ""
 
         rev_indicator = " ✓" if reviewed else ""
+        mon_indicator = " 📡" if monitor_cur else ""
+        enr_indicator = " 🔬" if enrich_cur else ""
         completeness_bar = _nc_completeness_bar(p["completeness"])
         label_html = (
             f"{cls_dot}<b>{company}</b> &nbsp;"
             f"<span style='color:#888;font-size:0.85rem;'>{domain}</span>"
             f"{spend_pill}{event_pill}"
             f" &nbsp; {completeness_bar}"
-            f"{rev_indicator}"
+            f"<span style='color:#0066CC;font-size:0.8rem;'>{mon_indicator}</span>"
+            f"<span style='color:#6A1B9A;font-size:0.8rem;'>{enr_indicator}</span>"
+            f"<span style='color:#2E7D32;font-size:0.8rem;'>{rev_indicator}</span>"
         )
         # st.expander doesn't accept HTML in its label, so we render a
         # markdown summary line above the expander as the visual signal row
