@@ -94,6 +94,23 @@ BATCH_SIZE   = 200
 BATCH_DELAY  = 1.0
 NC_PAGE_SIZE = 50
 
+# Strategic Tier 1 override -- companies always worth monitoring regardless of score.
+# Mirrors TIER1_OVERRIDE in build_master_company_list.py.
+# Used by the "Apply Tier 1 overrides" repair tool in tab_upload.
+TIER1_OVERRIDE = {
+    "ti.com", "analog.com", "nxp.com", "onsemi.com", "microchip.com",
+    "infineon.com", "st.com", "renesas.com", "mchp.com", "maximintegrated.com",
+    "latticesemi.com", "idt.com", "skyworksinc.com", "qorvo.com",
+    "wolfspeed.com", "macom.com", "semtech.com",
+    "rivian.com", "lucidmotors.com", "borgwarner.com", "vicr.com",
+    "teradyne.com", "ni.com", "astronics.com", "spirent.com",
+    "qualcomm.com", "broadcom.com", "marvell.com", "amd.com",
+    "intel.com", "nvidia.com", "murata.com", "tdk.com", "vishay.com",
+    "aptiv.com", "visteon.com", "magna.com", "denso.com", "continental.com",
+    "rockwellautomation.com", "abb.com", "yaskawa.com", "danfoss.com",
+    "emerson.com", "siemens.com", "schneider-electric.com",
+}
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # HELPERS
@@ -487,6 +504,63 @@ def _backfill_customers(sh, silent=False):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# TIER 1 OVERRIDE REPAIR TOOL
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _apply_tier1_overrides(sh) -> None:
+    """
+    Batch-update watch_tier = 1 in master_companies for every domain in
+    TIER1_OVERRIDE that is currently not Tier 1.
+    Single values_batch_update call -- no 429 risk.
+    """
+    with st.spinner("Reading master_companies..."):
+        ws, col, dom_idx = _sheet_index(sh)
+
+    if "watch_tier" not in col:
+        st.error("watch_tier column not found in master_companies.")
+        return
+
+    tier_col = col["watch_tier"] + 1   # 1-based for gspread
+    updates  = []
+    found    = []
+
+    all_vals = ws.get_all_values()
+    headers  = all_vals[0]
+    dom_c    = headers.index("domain") if "domain" in headers else 0
+    tier_c   = headers.index("watch_tier") if "watch_tier" in headers else None
+
+    for i, row in enumerate(all_vals[1:], start=2):
+        domain = row[dom_c].strip().lower()
+        if domain in TIER1_OVERRIDE:
+            current = row[tier_c].strip() if tier_c is not None else ""
+            found.append((domain, current))
+            if current != "1":
+                updates.append((i, tier_col, 1))
+
+    if not found:
+        st.info("None of the Tier 1 override domains were found in the Sheet yet. "
+                "Upload contact data first.")
+        return
+
+    already = sum(1 for _, t in found if t == "1")
+    to_fix  = len(updates)
+
+    st.write(f"Found **{len(found)}** override domains in Sheet -- "
+             f"{already} already Tier 1, **{to_fix}** need updating.")
+
+    if to_fix == 0:
+        st.success("All override domains are already Tier 1. Nothing to do.")
+        return
+
+    with st.spinner(f"Updating {to_fix} domain(s) to Tier 1..."):
+        _batch_update(ws, updates)
+
+    st.success(f"Done -- {to_fix} domain(s) set to Tier 1.")
+    st.session_state["wl_cache_dirty"] = True
+    st.info("Go to Watch List and click Reload from Sheet to see the changes.")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # TAB 1 -- UPLOAD
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -509,6 +583,16 @@ def tab_upload(sh):
         st.caption("Use these if customer status or spend data looks wrong after uploading orders.")
         if st.button("Backfill customer status from order history", key="backfill_customers"):
             _backfill_customers(sh)
+
+        st.markdown("---")
+        st.markdown("**Tier 1 strategic accounts**")
+        st.caption(
+            "Forces watch_tier=1 for ~47 known ICP-4/5 companies (TI, Qualcomm, "
+            "Infineon, etc.) regardless of their engagement score. Run once after "
+            "initial data load, or whenever you add domains to TIER1_OVERRIDE."
+        )
+        if st.button("Apply Tier 1 overrides", key="apply_tier1"):
+            _apply_tier1_overrides(sh)
         return
 
     st.write(f"**{len(uploaded_files)} file(s) ready to process:**")
@@ -1140,7 +1224,6 @@ def tab_watch_list(sh):
         status  = _wl_safe_str(r.get("customer_status")) or "prospect"
         try:   tier = int(float(str(r.get("watch_tier") or 2)))
         except: tier = 2
-        # Clamp to valid 1-3 range; any out-of-range value (e.g. old score data) becomes 2
         if tier not in (1, 2, 3): tier = 2
 
         spent     = _wl_safe_float(r.get("total_spent"))
@@ -1148,12 +1231,10 @@ def tab_watch_list(sh):
         monitor   = _wl_safe_bool(r.get("monitor"), default=True)
         enrich    = _wl_safe_bool(r.get("enrich"),  default=False)
 
-        # Name cleaning: strip nan artifacts, then validate against email
         contact_e     = _wl_safe_str(r.get("best_contact_email"))
         contact_t     = _wl_safe_str(r.get("best_contact_title"))
         contact_n_raw = _wl_strip_nan(_wl_safe_str(r.get("best_contact_name")))
         if contact_n_raw and contact_e and not _wl_name_matches_email(contact_n_raw, contact_e):
-            # Name doesn't match email -- prefer email-derived name, fall back to stored name
             contact_n = _wl_infer_name(contact_e) or contact_n_raw
         else:
             contact_n = contact_n_raw or _wl_infer_name(contact_e)
@@ -1174,10 +1255,8 @@ def tab_watch_list(sh):
 
     available_classes = sorted({p["cls"] for p in prepped if p["cls"]})
 
-    # Render Watch List sidebar (scoped to this tab context)
     _wl_render_sidebar(available_classes)
 
-    # Read sidebar values
     class_filter      = st.session_state.get("wl_class_filter", [])
     tier_filter       = st.session_state.get("wl_tier_filter", "All")
     status_filter     = st.session_state.get("wl_status_filter", "All")
@@ -1187,7 +1266,6 @@ def tab_watch_list(sh):
     excl_dist         = st.session_state.get("wl_excl_dist", True)
     sort_by           = st.session_state.get("wl_sort", "Watch tier (1 first)")
 
-    # Apply filters
     view = prepped
     if excl_dist:     view = [p for p in view if p["cls"] != "distributor"]
     if class_filter:  view = [p for p in view if p["cls"] in class_filter]
@@ -1203,13 +1281,11 @@ def tab_watch_list(sh):
     if monitor_only:      view = [p for p in view if p["monitor"]]
     if enriched_only:     view = [p for p in view if p["enriched"]]
 
-    # Sort
     if sort_by == "Watch tier (1 first)":    view = sorted(view, key=lambda p: (p["tier"], -p["spent"]))
     elif sort_by == "Company (A-Z)":         view = sorted(view, key=lambda p: p["company"].lower())
     elif sort_by == "Last activity (newest)": view = sorted(view, key=lambda p: p["last_act"] or "", reverse=True)
     else:                                     view = sorted(view, key=lambda p: -p["spent"])
 
-    # Summary metrics (always over full prepped, not filtered view)
     n_tier1    = sum(1 for p in prepped if p["tier"] == 1)
     n_customer = sum(1 for p in prepped if p["status"] == "customer")
     n_purchase = sum(1 for p in prepped if p["spent"] > 0)
@@ -1228,7 +1304,6 @@ def tab_watch_list(sh):
         st.info("No companies match the current filters.")
         return
 
-    # Inline tier quick-filter buttons
     t_counts = {t: sum(1 for p in view if p["tier"] == t) for t in [1, 2, 3]}
     active_qt = st.session_state.get("wl_quick_tier")
     qcols = st.columns(4)
@@ -1246,7 +1321,6 @@ def tab_watch_list(sh):
     if qt is not None:
         view = [p for p in view if p["tier"] == qt]
 
-    # Pagination
     filter_fp = (f"{sorted(class_filter)}|{tier_filter}|{status_filter}"
                  f"|{has_purchase_only}|{monitor_only}|{enriched_only}|{excl_dist}|{sort_by}|{qt}")
     if st.session_state.get("wl_filter_fp") != filter_fp:
@@ -1371,7 +1445,6 @@ def tab_watch_list(sh):
                     except Exception as ex:
                         st.warning(f"Could not save notes: {ex}")
 
-            # Sales History
             st.markdown("---")
             st.markdown("**Sales History**")
             if orders > 0:
