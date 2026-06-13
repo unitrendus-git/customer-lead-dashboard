@@ -1003,7 +1003,7 @@ def _nc_write_nc_flags(sh, nc_rows_data: list, domain: str,
                        monitor_val: bool, enrich_val: bool) -> None:
     """
     Write monitor + enrich flags back to new_contacts tab for one domain.
-    nc_rows_data is the full list of dicts from sheet_get_all (includes header offsets).
+    Uses sheet-name-prefixed ranges to guarantee writes land on new_contacts.
     """
     try:
         ws = sh.worksheet(SHEET_NEW_CONTACTS)
@@ -1014,6 +1014,7 @@ def _nc_write_nc_flags(sh, nc_rows_data: list, domain: str,
         mon_col = headers.index("monitor") + 1 if "monitor" in headers else None
         enr_col = headers.index("enrich")  + 1 if "enrich"  in headers else None
         dom_col = headers.index("domain")  + 1 if "domain"  in headers else 1
+        sheet_title = ws.title
 
         updates = []
         for i, row_vals in enumerate(all_vals[1:], start=2):
@@ -1024,7 +1025,17 @@ def _nc_write_nc_flags(sh, nc_rows_data: list, domain: str,
                     updates.append((i, enr_col, str(enrich_val)))
                 break
         if updates:
-            _batch_update(ws, updates)
+            body = {
+                "data": [
+                    {
+                        "range": f"'{sheet_title}'!{gspread.utils.rowcol_to_a1(r, c)}",
+                        "values": [[_sanitize_value(v)]],
+                    }
+                    for r, c, v in updates
+                ],
+                "valueInputOption": "RAW",
+            }
+            ws.spreadsheet.values_batch_update(body)
     except Exception as ex:
         st.warning(f"Could not update new_contacts flags for {domain}: {ex}")
 
@@ -1032,7 +1043,7 @@ def _nc_write_nc_flags(sh, nc_rows_data: list, domain: str,
 def _nc_mark_reviewed(sh, domains: list) -> bool:
     """
     Set reviewed = True for all given domains in new_contacts.
-    Single _batch_update call regardless of how many domains.
+    Uses sheet-name-prefixed ranges to guarantee writes land on new_contacts.
     """
     try:
         ws = sh.worksheet(SHEET_NEW_CONTACTS)
@@ -1044,6 +1055,7 @@ def _nc_mark_reviewed(sh, domains: list) -> bool:
         dom_col = headers.index("domain")   + 1 if "domain"   in headers else 1
         if not rev_col:
             return False
+        sheet_title = ws.title
 
         domain_set = set(domains)
         updates = []
@@ -1052,7 +1064,17 @@ def _nc_mark_reviewed(sh, domains: list) -> bool:
                 updates.append((i, rev_col, "True"))
 
         if updates:
-            _batch_update(ws, updates)
+            body = {
+                "data": [
+                    {
+                        "range": f"'{sheet_title}'!{gspread.utils.rowcol_to_a1(r, c)}",
+                        "values": [[v]],
+                    }
+                    for r, c, v in updates
+                ],
+                "valueInputOption": "RAW",
+            }
+            ws.spreadsheet.values_batch_update(body)
         return True
     except Exception as ex:
         st.warning(f"Mark-reviewed error: {ex}")
