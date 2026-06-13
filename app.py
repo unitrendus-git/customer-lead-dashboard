@@ -974,7 +974,7 @@ def tab_new_contacts(sh) -> None:
         status      = row.get("customer_status", "prospect")
         spent       = format_currency(row.get("total_spent", 0))
         orders      = row.get("total_orders", 0)
-        tags        = row.get("tags", "")
+        tags        = str(row.get("tags") or "")
         has_event   = str(row.get("has_event_tag", "")).strip() == "True"
         contact_n   = row.get("best_contact_name", "")
         contact_e   = row.get("best_contact_email", "")
