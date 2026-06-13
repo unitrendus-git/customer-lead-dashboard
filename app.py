@@ -660,8 +660,6 @@ def _backfill_customers(sh) -> None:
             spent_c  = _col("total_spent")
             orders_c = _col("total_orders")
 
-            st.caption(f"Debug: headers={nc_hdrs[:6]}, dom_c={dom_c}, status_c={status_c}, spent_c={spent_c}, orders_c={orders_c}")
-
             nc_updates = []
             nc_hit = 0
             for i, row_vals in enumerate(nc_vals[1:], start=2):
@@ -676,8 +674,6 @@ def _backfill_customers(sh) -> None:
                 if orders_c:
                     nc_updates.append((i, orders_c, s["total_orders"]))
                 nc_hit += 1
-
-            st.caption(f"Debug: {nc_hit} rows matched, {len(nc_updates)} cell updates queued")
 
             if nc_updates:
                 # Use sheet-name-prefixed ranges to guarantee writes land on new_contacts
@@ -698,10 +694,6 @@ def _backfill_customers(sh) -> None:
                     }
                     nc_ws.spreadsheet.values_batch_update(body)
                     time.sleep(0.5)
-
-                # Verify: read back row 2 customer_status to confirm write landed
-                verify_val = nc_ws.cell(2, status_c).value if status_c else "?"
-                st.caption(f"Debug verify: new_contacts D2 = {repr(verify_val)}")
 
         st.success(f"✅ new_contacts: updated {nc_hit:,} domains ({len(nc_updates):,} cells)")
         st.session_state["nc_cache_dirty"] = True
@@ -1176,11 +1168,6 @@ def tab_new_contacts(sh) -> None:
     if not all_rows:
         st.info("No contacts loaded yet. Upload a file on the Upload tab first.")
         return
-
-    # DEBUG: sample first customer_status values to diagnose read issue
-    sample_statuses = [r.get("customer_status") for r in all_rows[:5]]
-    sample_spent    = [r.get("total_spent") for r in all_rows[:5]]
-    st.caption(f"Debug sample — customer_status: {sample_statuses} | total_spent: {sample_spent}")
 
     # Pre-compute safe fields for every row once, not inside the render loop
     prepped = []
