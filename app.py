@@ -785,9 +785,276 @@ def _write_order_results(sh, result: dict, filename: str,
 # PLACEHOLDER TABS
 # ─────────────────────────────────────────────────────────────────────────────
 
+# ─────────────────────────────────────────────────────────────────────────────
+# TAB 2 — NEW CONTACTS
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _nc_class_badge(cls: str) -> str:
+    """Render an inline HTML color badge for a domain_class value."""
+    color = CLASS_COLOR.get(cls, "#546E7A")
+    label = CLASS_LABEL.get(cls, cls.title())
+    return (
+        f'<span style="background:{color};color:#fff;padding:2px 8px;'
+        f'border-radius:4px;font-size:0.78rem;font-weight:600;'
+        f'letter-spacing:0.03em;">{label}</span>'
+    )
+
+
+def _nc_write_master_flags(sh, domain: str, monitor_val: bool,
+                           enrich_val: bool) -> None:
+    """
+    Write monitor + enrich flags for one domain to master_companies.
+    Single _batch_update call — no loop, no 429 risk.
+    """
+    try:
+        ws, col, dom_idx = _sheet_index(sh)
+        if domain not in dom_idx:
+            return
+        r = dom_idx[domain]
+        updates = []
+        if "monitor" in col:
+            updates.append((r + 1, col["monitor"] + 1, str(monitor_val)))
+        if "enrich" in col:
+            updates.append((r + 1, col["enrich"] + 1, str(enrich_val)))
+        if updates:
+            _batch_update(ws, updates)
+    except Exception as ex:
+        st.warning(f"Could not update master_companies for {domain}: {ex}")
+
+
+def _nc_write_nc_flags(sh, nc_rows_data: list, domain: str,
+                       monitor_val: bool, enrich_val: bool) -> None:
+    """
+    Write monitor + enrich flags back to new_contacts tab for one domain.
+    nc_rows_data is the full list of dicts from sheet_get_all (includes header offsets).
+    """
+    try:
+        ws = sh.worksheet(SHEET_NEW_CONTACTS)
+        all_vals = ws.get_all_values()
+        if not all_vals:
+            return
+        headers = all_vals[0]
+        mon_col = headers.index("monitor") + 1 if "monitor" in headers else None
+        enr_col = headers.index("enrich")  + 1 if "enrich"  in headers else None
+        dom_col = headers.index("domain")  + 1 if "domain"  in headers else 1
+
+        updates = []
+        for i, row_vals in enumerate(all_vals[1:], start=2):
+            if row_vals[dom_col - 1] == domain:
+                if mon_col:
+                    updates.append((i, mon_col, str(monitor_val)))
+                if enr_col:
+                    updates.append((i, enr_col, str(enrich_val)))
+                break
+        if updates:
+            _batch_update(ws, updates)
+    except Exception as ex:
+        st.warning(f"Could not update new_contacts flags for {domain}: {ex}")
+
+
+def _nc_mark_reviewed(sh, domains: list) -> bool:
+    """
+    Set reviewed = True for all given domains in new_contacts.
+    Single _batch_update call regardless of how many domains.
+    """
+    try:
+        ws = sh.worksheet(SHEET_NEW_CONTACTS)
+        all_vals = ws.get_all_values()
+        if not all_vals:
+            return False
+        headers = all_vals[0]
+        rev_col = headers.index("reviewed") + 1 if "reviewed" in headers else None
+        dom_col = headers.index("domain")   + 1 if "domain"   in headers else 1
+        if not rev_col:
+            return False
+
+        domain_set = set(domains)
+        updates = []
+        for i, row_vals in enumerate(all_vals[1:], start=2):
+            if row_vals[dom_col - 1] in domain_set:
+                updates.append((i, rev_col, "True"))
+
+        if updates:
+            _batch_update(ws, updates)
+        return True
+    except Exception as ex:
+        st.warning(f"Mark-reviewed error: {ex}")
+        return False
+
+
 def tab_new_contacts(sh) -> None:
     st.header("New Contacts")
-    st.info("🔜 Coming next — review and approve newly uploaded companies.")
+    st.caption(
+        "Companies added since the last upload that haven't been reviewed yet. "
+        "Set monitor and enrich flags, then mark each row reviewed to clear the queue."
+    )
+
+    # ── Load data ────────────────────────────────────────────────────────────
+    with st.spinner("Loading new contacts…"):
+        all_rows = sheet_get_all(sh, SHEET_NEW_CONTACTS)
+
+    unreviewed = [r for r in all_rows if str(r.get("reviewed", "")).strip() != "True"]
+
+    if not unreviewed:
+        st.success("✅ Queue clear — no unreviewed contacts.")
+        if st.button("🔄 Refresh"):
+            st.rerun()
+        return
+
+    # ── Sidebar filters ───────────────────────────────────────────────────────
+    with st.sidebar:
+        st.markdown("### 🔍 Filter New Contacts")
+
+        status_filter = st.radio(
+            "Customer status",
+            ["All", "Customers only", "Prospects only"],
+            index=0,
+            key="nc_status_filter",
+        )
+
+        available_classes = sorted(
+            {r.get("domain_class", "") for r in unreviewed if r.get("domain_class")}
+        )
+        class_filter = st.multiselect(
+            "Domain class",
+            options=available_classes,
+            default=available_classes,
+            key="nc_class_filter",
+        )
+
+    # ── Apply filters ─────────────────────────────────────────────────────────
+    filtered = unreviewed
+    if status_filter == "Customers only":
+        filtered = [r for r in filtered if r.get("customer_status") == "customer"]
+    elif status_filter == "Prospects only":
+        filtered = [r for r in filtered if r.get("customer_status") != "customer"]
+    if class_filter:
+        filtered = [r for r in filtered if r.get("domain_class", "") in class_filter]
+
+    # ── Summary bar ───────────────────────────────────────────────────────────
+    col_a, col_b, col_c, col_d = st.columns(4)
+    col_a.metric("Unreviewed", len(unreviewed))
+    col_b.metric("Showing", len(filtered))
+    col_c.metric(
+        "Customers",
+        sum(1 for r in filtered if r.get("customer_status") == "customer"),
+    )
+    col_d.metric(
+        "Monitor flagged",
+        sum(1 for r in filtered if str(r.get("monitor", "")) == "True"),
+    )
+
+    st.markdown("---")
+
+    if not filtered:
+        st.info("No contacts match the current filters.")
+        return
+
+    # ── Bulk action ───────────────────────────────────────────────────────────
+    if st.button(
+        f"✅ Mark all {len(filtered):,} shown as reviewed",
+        key="nc_mark_all",
+        type="secondary",
+    ):
+        domains_to_clear = [r["domain"] for r in filtered if r.get("domain")]
+        with st.spinner(f"Marking {len(domains_to_clear):,} rows reviewed…"):
+            ok = _nc_mark_reviewed(sh, domains_to_clear)
+        if ok:
+            st.success(f"Marked {len(domains_to_clear):,} contacts as reviewed.")
+            st.rerun()
+
+    st.markdown(f"**{len(filtered):,} contact(s) awaiting review** — expand a row to act on it.")
+    st.markdown("")
+
+    # ── Per-row expanders ─────────────────────────────────────────────────────
+    for idx, row in enumerate(filtered):
+        domain      = row.get("domain", "")
+        company     = row.get("company_name") or domain
+        cls         = row.get("domain_class", "commercial")
+        status      = row.get("customer_status", "prospect")
+        spent       = format_currency(row.get("total_spent", 0))
+        orders      = row.get("total_orders", 0)
+        tags        = row.get("tags", "")
+        has_event   = str(row.get("has_event_tag", "")).strip() == "True"
+        contact_n   = row.get("best_contact_name", "")
+        contact_e   = row.get("best_contact_email", "")
+        first_seen  = row.get("first_seen", "")
+        added_date  = row.get("added_date", "")
+        monitor_cur = str(row.get("monitor", "True")).strip() == "True"
+        enrich_cur  = str(row.get("enrich",  "False")).strip() == "True"
+
+        # Expander label: company name + class badge + spend if customer
+        spend_label = f" · {spent}" if status == "customer" else ""
+        expander_label = f"{company}  ·  {domain}{spend_label}"
+
+        with st.expander(expander_label, expanded=False):
+
+            # Top row: badge + status indicator
+            badge_html = _nc_class_badge(cls)
+            status_icon = "🟢" if status == "customer" else "⚪"
+            st.markdown(
+                f"{badge_html} &nbsp; {status_icon} &nbsp;"
+                f"<span style='font-size:0.85rem;color:#555;'>{status.title()}</span>",
+                unsafe_allow_html=True,
+            )
+            st.markdown("")
+
+            # Details grid
+            d1, d2, d3 = st.columns(3)
+            with d1:
+                st.markdown("**Domain**")
+                st.code(domain, language=None)
+                st.markdown(f"**First seen:** {first_seen or added_date or '—'}")
+            with d2:
+                st.markdown("**Best contact**")
+                st.write(contact_n or "—")
+                if contact_e:
+                    st.caption(contact_e)
+            with d3:
+                st.markdown("**Purchase data**")
+                st.write(f"{spent} across {orders} order(s)" if int(orders or 0) > 0
+                         else "No purchases on record")
+                if tags:
+                    tag_list = ", ".join(t.strip() for t in tags.split(",") if t.strip())
+                    st.caption(f"Tags: {tag_list}")
+                if has_event:
+                    st.caption("🎟 Has event tag")
+
+            st.markdown("")
+
+            # Toggles — writes immediately on change
+            t1, t2, t3 = st.columns([1, 1, 2])
+            with t1:
+                new_monitor = st.checkbox(
+                    "Monitor",
+                    value=monitor_cur,
+                    key=f"nc_mon_{idx}_{domain}",
+                    help="Add this domain to the active signal-monitoring queue.",
+                )
+            with t2:
+                new_enrich = st.checkbox(
+                    "Enrich",
+                    value=enrich_cur,
+                    key=f"nc_enr_{idx}_{domain}",
+                    help="Queue this domain for homepage scrape + ICP classification.",
+                )
+
+            flags_changed = (new_monitor != monitor_cur) or (new_enrich != enrich_cur)
+            if flags_changed:
+                with st.spinner("Saving flags…"):
+                    _nc_write_master_flags(sh, domain, new_monitor, new_enrich)
+                    _nc_write_nc_flags(sh, all_rows, domain, new_monitor, new_enrich)
+                st.toast(f"Flags updated for {company}.", icon="✅")
+
+            with t3:
+                if st.button(
+                    "✅ Mark reviewed",
+                    key=f"nc_rev_{idx}_{domain}",
+                    type="primary",
+                ):
+                    with st.spinner("Marking reviewed…"):
+                        _nc_mark_reviewed(sh, [domain])
+                    st.rerun()
 
 
 def tab_watch_list(sh) -> None:
