@@ -741,8 +741,14 @@ def _write_order_results(sh, result: dict, filename: str,
                 if domain not in dom_idx:
                     continue
                 r = dom_idx[domain]
+def _sv(v):
+                    """Sanitize a single value — replace nan/inf with empty string."""
+                    if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
+                        return ""
+                    return v
+
                 for field, value in [
-                    ("total_spent",   round(stats["total_spent"], 2)),
+                    ("total_spent",   _sv(round(stats["total_spent"], 2))),
                     ("total_orders",  stats["total_orders"]),
                     ("has_purchases", "True"),
                     ("in_shopify",    "True"),
@@ -752,10 +758,10 @@ def _write_order_results(sh, result: dict, filename: str,
                         updates_needed.append((r + 1, col[field] + 1, value))
                 if stats["email"] and "best_contact_email" in col:
                     updates_needed.append(
-                        (r + 1, col["best_contact_email"] + 1, stats["email"]))
+                        (r + 1, col["best_contact_email"] + 1, _sv(stats["email"])))
                 if stats["company"] and "company_name" in col:
                     updates_needed.append(
-                        (r + 1, col["company_name"] + 1, stats["company"]))
+                        (r + 1, col["company_name"] + 1, _sv(stats["company"])))
 
             if updates_needed:
                 progress.progress(
